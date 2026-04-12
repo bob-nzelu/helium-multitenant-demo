@@ -1,0 +1,20 @@
+{
+  "abmfb": {
+    "api_key":       "ABMFB-2026-K7X9MNPQ",
+    "api_secret":    "hx84Tz2wVqLmN9jKpRdY6cBsAeWfUg3n",
+    "service_id":    "ABMFB",
+    "firs_service_id": "94ND90NR",
+    "name":          "AB Microfinance Bank",
+    "format_type":   "flat",
+    "fields":        {}
+  },
+  "abbey": {
+    "api_key":       "ABBEY-2026-AQ1P6JMS",
+    "api_secret":    "Ysas2LCrs0ttlwm0N5Y0u44OPABFn0yT",
+    "service_id":    "ABBEY",
+    "firs_service_id": "A8BM72KQ",
+    "name":          "Abbey Mortgage Bank",
+    "format_type":   "ubl",
+    "fields":        {}
+  }
+}

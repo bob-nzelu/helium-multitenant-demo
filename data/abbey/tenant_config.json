@@ -1,0 +1,22 @@
+{
+  "tenant_id": "abbey",
+  "company_name": "Abbey Mortgage Bank PLC",
+  "trading_name": "Abbey Mortgage",
+  "tin": "02345678-0001",
+  "rc_number": "RC464532",
+  "tax_id": "0234567800001",
+  "firs_service_id": "A8BM72KQ",
+  "email": "info@abbeymortgage.com",
+  "phone": "+2349012345678",
+  "website": "www.abbeymortgage.com",
+  "address": "3 Abiola Segun Akinola Crescent, off Obafemi Awolowo Way",
+  "city": "Ikeja",
+  "state": "Lagos",
+  "state_code": "25",
+  "country": "NGA",
+  "country_code": "NG",
+  "industry": "Banking / Mortgage Finance",
+  "api_key": "ABBEY-2026-AQ1P6JMS",
+  "api_secret": "Ysas2LCrs0ttlwm0N5Y0u44OPABFn0yT",
+  "invoice_prefix": "ABB"
+}

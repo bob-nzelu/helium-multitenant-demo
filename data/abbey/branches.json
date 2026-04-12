@@ -1,0 +1,7 @@
+[
+  {"name": "Victoria Island", "address": "12 Akin Adesola Street", "city": "Victoria Island", "state": "Lagos", "state_code": "25"},
+  {"name": "Ikeja",           "address": "3 Abiola Segun Akinola Crescent, off Obafemi Awolowo Way", "city": "Ikeja", "state": "Lagos", "state_code": "25"},
+  {"name": "Lekki",           "address": "Plot 5, Admiralty Way", "city": "Lekki", "state": "Lagos", "state_code": "25"},
+  {"name": "Surulere",        "address": "45 Adeniran Ogunsanya Street", "city": "Surulere", "state": "Lagos", "state_code": "25"},
+  {"name": "Abuja - Wuse",    "address": "22 Aminu Kano Crescent", "city": "Wuse 2", "state": "FCT", "state_code": "37"}
+]
