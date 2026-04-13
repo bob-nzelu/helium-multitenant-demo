@@ -114,9 +114,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - CORE_DATABASE_URL=postgresql://${PG_USER:-helium}:${PG_PASSWORD:-helium_demo_2026}@postgres:5432/${PG_DATABASE:-helium}
-      - CORE_HEARTBEAT_URL=http://heartbeat:9000
+      - CORE_DB_HOST=postgres
+      - CORE_DB_PORT=5432
+      - CORE_DB_USER=${PG_USER:-helium}
+      - CORE_DB_PASSWORD=${PG_PASSWORD:-helium_demo_2026}
+      - CORE_DB_NAME=${PG_DATABASE:-helium}
+      - CORE_HOST=0.0.0.0
       - CORE_PORT=8080
+      - CORE_HEARTBEAT_URL=http://heartbeat:9000
     depends_on:
       postgres:
         condition: service_healthy
@@ -125,7 +130,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   # ── Simulator (shell — built in dedicated session) ─────────────────
   simulator:
