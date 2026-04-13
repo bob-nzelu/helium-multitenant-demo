@@ -162,6 +162,19 @@ services:
       retries: 3
       start_period: 5s
 
+  # ── SIS (Stub) ──────────────────────────────────────────────────────
+  sis:
+    build:
+      context: ./services/sis
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8501/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
   # ── Simulator ──────────────────────────────────────────────────────
   simulator:
     build:
