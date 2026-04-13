@@ -285,3 +285,26 @@ async def mock_policy(operation: str):
         "required_within_seconds": 300,
         "tier": "standard",
     }
+
+
+@router.post("/reset")
+async def mock_reset():
+    """
+    Reset auth state to first-time login.
+
+    Frontend calls this to re-trigger the first-run flow during demo
+    without restarting HeartBeat.
+    """
+    _state["password"] = "123456"
+    _state["is_first_run"] = True
+    _state["session_id"] = None
+    _state["jwt_jti"] = None
+
+    logger.info("Mock auth RESET — back to first-time login (password: 123456)")
+
+    return {
+        "status": "reset",
+        "is_first_run": True,
+        "password": "123456",
+        "message": "Auth state reset. Next login will be first-time flow.",
+    }
