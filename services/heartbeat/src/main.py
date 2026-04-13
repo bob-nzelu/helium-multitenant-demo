@@ -526,7 +526,14 @@ app.include_router(metrics_router)
 app.include_router(blob_status_router)
 
 # Auth (Part 4 -- login, refresh, logout, introspect, stepup, policy)
-app.include_router(auth_router)
+import os
+if os.environ.get("HEARTBEAT_MOCK_AUTH", "").lower() in ("true", "1", "yes"):
+    from .api.mock_auth import router as mock_auth_router
+    app.include_router(mock_auth_router)
+    import logging
+    logging.getLogger(__name__).warning("MOCK AUTH ENABLED — demo mode, not for production")
+else:
+    app.include_router(auth_router)
 
 # SSE Stream (authenticated, multiplexed events)
 from .api.sse import router as sse_stream_router
