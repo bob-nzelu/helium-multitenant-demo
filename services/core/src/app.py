@@ -1,484 +1,301 @@
 """
-Helium Core Service — Demo Build (Mock Processing + Real SSE)
+Core Service Application Factory
 
-Provides transformation pipeline for the Abbey Mortgage demo:
-  - Receives files from Relay (via queue/direct call)
-  - Mock-processes with realistic stdout logs
-  - Writes invoices to canonical PostgreSQL tables
-  - Publishes invoice.created events through HeartBeat SSE
-  - Serves sync/full endpoint for Float bulk-load
-
-Endpoints:
-  POST /api/v1/process     — Process queued file (Relay → Core)
-  POST /api/v1/ingest      — Direct inbound invoice (Simulator → Core)
-  POST /api/v1/finalize    — Finalize preview (Float → Core)
-  GET  /api/sync/full      — Bulk-load invoices for Float sync
-  GET  /api/v1/invoices    — Paginated invoice list
-  GET  /api/v1/invoice/:id — Single invoice
-  GET  /health
+FastAPI app with lifespan managing: pool, scheduler, SSE manager.
+Pattern follows Relay's create_app() convention.
 """
 
-import asyncio
-import json
-import logging
-import os
-import re
-import uuid
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from __future__ import annotations
 
-import asyncpg
-import httpx
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
+import time
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-logger = logging.getLogger("helium.core")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [CORE] %(levelname)s %(message)s",
-    datefmt="%H:%M:%S",
-)
+from src import __version__
+from src.config import CoreConfig
+from src.database.pool import close_pool, create_pool
+from src.database.init import init_schemas
+from src.errors import CoreError
+from src.health import router as health_router
+from src.ingestion.heartbeat_client import HeartBeatBlobClient
+from src.ingestion.parsers.registry import create_default_registry
+from src.ingestion.queue_scanner import QueueScanner
+from src.ingestion.router import router as ingestion_router
+from src.middleware.cors import configure_cors
+from src.middleware.logging import RequestLoggingMiddleware
+from src.middleware.trace_id import TraceIDMiddleware
+from src.scheduler import create_scheduler, register_jobs, register_ws4_jobs, register_queue_jobs, register_sse_jobs, register_ws7_jobs, set_scheduler_deps
+from src.sse.entity_events import EntityEventListener
+from src.sse.event_ledger import EventLedger
+from src.sse.manager import SSEConnectionManager
+from src.sse.router import router as sse_router
+from src.webhook import router as webhook_router
+from src.config_cache import TenantConfigCache
+
+# WS4: Entity CRUD routers
+from src.api.invoices import router as invoices_router
+from src.api.customers import router as customers_router
+from src.api.inventory import router as inventory_router
+from src.api.entities import router as entities_router
+from src.api.search import router as search_router
+
+# WS7: Reports & Statistics
+from src.reports.router import router as reports_router
+from src.reports.statistics_router import router as statistics_router
+
+# WS6: Observability
+from src.observability.audit_logger import AuditLogger
+from src.observability.audit_middleware import EntityAuditMiddleware
+from src.observability.metrics import core_info
+from src.observability.metrics_collector import MetricsCollector
+from src.observability.metrics_middleware import PrometheusMiddleware
+from src.observability.notification_service import NotificationService
+from src.observability.router import router as observability_router
+
+logger = structlog.get_logger()
 
 
-def _uuid7_hex() -> str:
-    return uuid.uuid4().hex[:16].upper()
-
-
-def _generate_irn(invoice_number: str, service_id: str, issue_date: str) -> str:
-    """IRN per IQC spec: {invoice_number}-{service_id}-{YYYYMMDD}"""
-    date_part = issue_date.replace("-", "") if issue_date else datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"{invoice_number}-{service_id}-{date_part}"
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    db_url = os.environ.get("CORE_DATABASE_URL", "postgresql://helium:helium_demo_2026@localhost:5432/helium")
-    pool = await asyncpg.create_pool(db_url, min_size=2, max_size=10)
-    app.state.pool = pool
-    app.state.heartbeat_url = os.environ.get("CORE_HEARTBEAT_URL", "http://heartbeat:9000")
-    app.state.internal_token = os.environ.get("CORE_INTERNAL_TOKEN", "dev-token-123")
-    app.state.http_client = httpx.AsyncClient(timeout=10.0)
-    logger.info("Core service started — DB pool ready")
-    yield
-    await app.state.http_client.aclose()
-    await pool.close()
-
-
-app = FastAPI(title="Helium Core (Demo)", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-
-async def _publish_event(app_state, event_type: str, data: dict, company_id: str = "abbey"):
-    """Push an event through HeartBeat's SSE pipeline."""
-    try:
-        resp = await app_state.http_client.post(
-            f"{app_state.heartbeat_url}/api/internal/events/publish",
-            json={
-                "event_type": event_type,
-                "data": data,
-                "company_id": company_id,
-            },
-            headers={"Authorization": f"Bearer {app_state.internal_token}"},
-        )
-        if resp.status_code == 200:
-            logger.info(f"  SSE → {event_type} published (seq={resp.json().get('sequence', '?')})")
-        else:
-            logger.warning(f"  SSE → {event_type} failed: {resp.status_code}")
-    except Exception as e:
-        logger.warning(f"  SSE → {event_type} error: {e}")
-
-
-async def _update_blob_status(app_state, blob_uuid: str, status: str, stats: dict = None):
-    """Update blob status in HeartBeat (triggers blob.status_changed SSE)."""
-    try:
-        payload = {"status": status}
-        if stats:
-            payload["processing_stats"] = stats
-        resp = await app_state.http_client.post(
-            f"{app_state.heartbeat_url}/api/v1/heartbeat/blob/{blob_uuid}/status",
-            json=payload,
-        )
-        logger.info(f"  Blob {blob_uuid[:8]}... → {status}")
-    except Exception as e:
-        logger.warning(f"  Blob status update failed: {e}")
-
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "service": "core", "version": "0.1.0"}
-
-
-# ── POST /api/v1/process — Receive file from Relay queue ────────────────────
-
-@app.post("/api/v1/process")
-async def process_file(request: Request):
+def create_app(config: CoreConfig | None = None) -> FastAPI:
     """
-    Process a queued file from Relay.
+    Factory function that creates and configures the FastAPI app.
 
-    Mock processing flow with realistic stdout logging:
-    1. Receive blob reference
-    2. Log: "Extracting invoice data..."
-    3. Wait 1-2s (simulating OCR/parsing)
-    4. Log: "Transforming to FIRS schema..."
-    5. Wait 1s
-    6. Generate mock invoice data
-    7. Write to invoices table
-    8. Update blob status in HeartBeat (processing → preview_pending)
-    9. Publish invoice.created via HeartBeat SSE
-    10. Return preview data
+    Usage:
+        uvicorn src.app:create_app --factory --host 0.0.0.0 --port 8080
     """
-    body = await request.json()
-    blob_uuid = body.get("blob_uuid") or body.get("data_uuid") or _uuid7_hex()
-    tenant_id = body.get("tenant_id", "abbey")
-    filenames = body.get("filenames", ["unknown.json"])
-    trace_id = body.get("trace_id", _uuid7_hex())
+    if config is None:
+        config = CoreConfig.from_env()
 
-    logger.info(f"{'='*60}")
-    logger.info(f"PROCESSING REQUEST — trace={trace_id[:12]}...")
-    logger.info(f"  Blob: {blob_uuid[:12]}...")
-    logger.info(f"  Files: {filenames}")
-    logger.info(f"  Tenant: {tenant_id}")
-    logger.info(f"{'='*60}")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # ── STARTUP ──────────────────────────────────────────────────
+        app.state.start_time = time.monotonic()
+        app.state.config = config
 
-    # Step 1: Update blob status → processing
-    await _update_blob_status(request.app.state, blob_uuid, "processing")
+        # Configure structlog
+        structlog.configure(
+            processors=[
+                structlog.contextvars.merge_contextvars,
+                structlog.processors.add_log_level,
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.StackInfoRenderer(),
+                structlog.processors.format_exc_info,
+                structlog.processors.JSONRenderer(),
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(
+                structlog._log_levels.NAME_TO_LEVEL[config.log_level.lower()]
+            ),
+            context_class=dict,
+            logger_factory=structlog.PrintLoggerFactory(),
+            cache_logger_on_first_use=True,
+        )
 
-    # Step 2: Simulate extraction
-    logger.info(f"  [1/4] Extracting invoice data from {filenames[0]}...")
-    await asyncio.sleep(1.5)
-    logger.info(f"  [1/4] Extraction complete — 1 invoice found")
+        # Database pool
+        pool = await create_pool(config)
+        app.state.pool = pool
 
-    # Step 3: Simulate transformation
-    logger.info(f"  [2/4] Transforming to FIRS schema...")
-    await asyncio.sleep(1.0)
-    logger.info(f"  [2/4] Transformation complete")
+        # Initialize schemas
+        await init_schemas(pool)
 
-    # Step 4: Generate invoice
-    logger.info(f"  [3/4] Generating IRN and writing to database...")
+        # SSE manager
+        sse_manager = SSEConnectionManager(
+            buffer_size=config.sse_buffer_size,
+            heartbeat_interval=config.sse_heartbeat_interval,
+        )
+        await sse_manager.start_heartbeat()
+        app.state.sse_manager = sse_manager
 
-    invoice_id = _uuid7_hex()
-    invoice_number = f"ABB-{int(datetime.now(timezone.utc).timestamp()) % 10000000:07d}"
-    service_id = "A8BM72KQ"  # Abbey's FIRS service_id
-    issue_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    irn = _generate_irn(invoice_number, service_id, issue_date)
-    helium_no = f"PRO-ABBEY-{invoice_id}"
+        # SSE Event Ledger (SSE_SPEC Section 4)
+        event_ledger = EventLedger(
+            retention_hours=config.sse_ledger_retention_hours,
+        )
+        app.state.event_ledger = event_ledger
 
-    # Mock extracted data (in real Core, this comes from Transforma extraction)
-    subtotal = 250000.00
-    tax_amount = 18750.00
-    total_amount = 268750.00
+        # Wire ledger into SSE manager for automatic ledger writes on publish
+        sse_manager.set_ledger(event_ledger, pool)
+        await sse_manager.sync_sequence_from_ledger()
 
-    pool: asyncpg.Pool = request.app.state.pool
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO invoices (
-                    tenant_id, invoice_id, helium_invoice_no, invoice_number, irn,
-                    csid, csid_status, direction, document_type, firs_invoice_type_code,
-                    transaction_type, issue_date, subtotal, tax_amount, total_amount,
-                    payment_means, workflow_status, transmission_status, payment_status,
-                    company_id, seller_name, seller_tin, seller_address, seller_city,
-                    buyer_name, buyer_tin,
-                    product_summary, line_items_count, source, source_id,
-                    schema_version_applied, sign_date,
-                    invoice_trace_id, blob_uuid
-                ) VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-                    $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
-                )
-            """,
-                tenant_id, invoice_id, helium_no, invoice_number, irn,
-                irn[:32].upper(), 'ISSUED', 'OUTBOUND', 'COMMERCIAL_INVOICE', '380',
-                'B2C', issue_date, subtotal, tax_amount, total_amount,
-                'BANK_TRANSFER', 'COMMITTED', 'NOT_REQUIRED', 'UNPAID',
-                tenant_id, 'Abbey Mortgage Bank PLC', '02345678-0001',
-                '3 Abiola Segun Akinola Crescent, off Obafemi Awolowo Way', 'Ikeja',
-                'Demo Customer', '00100001-0001',
-                'Mortgage Origination Fee', 1, 'bulk_upload', trace_id,
-                '2.1.3.0', issue_date,
-                trace_id, blob_uuid
+        # Scheduler (APScheduler v4 requires async context manager)
+        scheduler = create_scheduler()
+        app.state.scheduler = scheduler
+
+        if scheduler:
+            await scheduler.__aenter__()
+            set_scheduler_deps(pool, event_ledger=event_ledger)
+            await register_jobs(scheduler)
+            await register_ws4_jobs(scheduler, pool)
+            await register_queue_jobs(scheduler, pool)
+            await register_sse_jobs(scheduler, pool, event_ledger)
+
+        # WS1: HeartBeat blob client
+        heartbeat_client = HeartBeatBlobClient(
+            base_url=config.heartbeat_url,
+            api_key=config.heartbeat_api_key,
+            timeout=config.blob_fetch_timeout,
+        )
+        app.state.heartbeat_client = heartbeat_client
+
+        # Tenant config cache — fetch full config from HeartBeat at startup
+        config_cache = TenantConfigCache(heartbeat_client)
+        await config_cache.load()  # Non-fatal: falls back to env var defaults
+        app.state.config_cache = config_cache
+
+        # HIS Intelligence Feedback client
+        his_feedback_client = None
+        if config.his_feedback_enabled:
+            from src.processing.his_feedback_client import HISFeedbackClient
+            his_feedback_client = HISFeedbackClient(
+                base_url=config.his_base_url,
+                api_key=config.his_api_key,
+                timeout=config.his_feedback_timeout,
             )
+        app.state.his_feedback_client = his_feedback_client
 
-        logger.info(f"  [3/4] Invoice {invoice_number} written (IRN: {irn})")
-    except Exception as e:
-        logger.error(f"  [3/4] DB write failed: {e}")
-        raise HTTPException(status_code=500, detail=f"DB write failed: {e}")
+        # WS6: Audit logger (fire-and-forget, pool-based) — created early so
+        # downstream services can use it
+        audit_logger = AuditLogger(pool)
+        app.state.audit_logger = audit_logger
 
-    # Step 5: Update blob status → preview_pending
-    await _update_blob_status(request.app.state, blob_uuid, "preview_pending", {
-        "extracted_invoice_count": 1,
-        "rejected_invoice_count": 0,
-    })
+        # WS6: Notification service
+        notification_service = NotificationService(pool, sse_manager)
+        app.state.notification_service = notification_service
 
-    # Step 6: Publish invoice.created SSE event
-    logger.info(f"  [4/4] Publishing invoice.created event...")
-
-    invoice_event_data = {
-        "invoice_id": invoice_id,
-        "helium_invoice_no": helium_no,
-        "invoice_number": invoice_number,
-        "irn": irn,
-        "direction": "OUTBOUND",
-        "issue_date": issue_date,
-        "subtotal": subtotal,
-        "tax_amount": tax_amount,
-        "total_amount": total_amount,
-        "seller_name": "Abbey Mortgage Bank PLC",
-        "buyer_name": "Demo Customer",
-        "workflow_status": "COMMITTED",
-        "payment_status": "UNPAID",
-        "product_summary": "Mortgage Origination Fee",
-        "line_items_count": 1,
-        "source": "bulk_upload",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    await _publish_event(request.app.state, "invoice.created", invoice_event_data, tenant_id)
-
-    logger.info(f"  DONE — Invoice {invoice_number} processed successfully")
-    logger.info(f"{'='*60}")
-
-    return {
-        "status": "processed",
-        "queue_id": trace_id,
-        "invoice_id": invoice_id,
-        "helium_invoice_no": helium_no,
-        "invoice_number": invoice_number,
-        "irn": irn,
-        "preview_data": {
-            "invoice_count": 1,
-            "total_amount": total_amount,
-            "currency": "NGN",
-            "items": [{
-                "invoice_number": invoice_number,
-                "irn": irn,
-                "subtotal": subtotal,
-                "tax_amount": tax_amount,
-                "total_amount": total_amount,
-                "description": "Mortgage Origination Fee",
-            }],
-        },
-    }
-
-
-# ── POST /api/v1/ingest — Direct inbound invoice (Simulator → Core) ────────
-
-@app.post("/api/v1/ingest")
-async def ingest_invoice(request: Request):
-    """
-    Receive and store an invoice (inbound or outbound).
-    Called by Simulator for inbound (FIRS delivery) or direct API.
-    """
-    body = await request.json()
-    tenant_id = body.get("tenant_id", "abbey")
-    direction = body.get("direction", "OUTBOUND")
-    source = body.get("source", "Core API")
-    source_id = body.get("source_id", "core-direct")
-
-    # Extract from UBL or flat format
-    supplier = body.get("accountingSupplierParty") or body.get("accounting_supplier_party", {})
-    customer = body.get("accountingCustomerParty") or body.get("accounting_customer_party", {})
-
-    invoice_number = body.get("invoiceTypeCode") or body.get("invoice_type_code") or f"CORE-{_uuid7_hex()[:8]}"
-    issue_date = body.get("issueDate") or body.get("issue_date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    service_id = "A8BM72KQ"
-    invoice_id = _uuid7_hex()
-    irn = _generate_irn(invoice_number, service_id, issue_date)
-    helium_no = f"PRO-ABBEY-{invoice_id}"
-
-    # Compute totals from line items
-    lines = body.get("invoiceLine") or body.get("invoice_line", [])
-    subtotal = 0.0
-    for line in lines:
-        price_info = line.get("price", {})
-        price = float(price_info.get("priceAmount") or price_info.get("price_amount", 0))
-        qty = float(line.get("invoicedQuantity") or line.get("invoiced_quantity", 1))
-        subtotal += price * qty
-
-    tax_totals = body.get("taxTotal") or body.get("tax_total", [])
-    tax_amount = sum(float(t.get("taxAmount") or t.get("tax_amount", 0)) for t in tax_totals)
-    if tax_amount == 0 and subtotal > 0:
-        tax_amount = round(subtotal * 0.075, 2)
-    total_amount = round(subtotal + tax_amount, 2)
-
-    seller_name = supplier.get("partyName") or supplier.get("party_name", "")
-    seller_tin = supplier.get("tin", "")
-    buyer_name = customer.get("partyName") or customer.get("party_name", "")
-
-    line_names = [l.get("item", {}).get("name", "Item") for l in lines]
-    product_summary = line_names[0] if len(line_names) == 1 else f"{line_names[0]} (+{len(line_names)-1} more)" if line_names else ""
-
-    logger.info(f"INGEST — {direction} invoice {invoice_number} from {seller_name or 'unknown'}")
-
-    pool: asyncpg.Pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO invoices (
-                tenant_id, invoice_id, helium_invoice_no, invoice_number, irn,
-                csid, csid_status, direction, document_type, firs_invoice_type_code,
-                transaction_type, issue_date, subtotal, tax_amount, total_amount,
-                payment_means, workflow_status, payment_status,
-                company_id, seller_name, seller_tin, buyer_name,
-                product_summary, line_items_count, source, source_id,
-                schema_version_applied
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                $19,$20,$21,$22,$23,$24,$25,$26,$27
+        # WS7: Register scheduled report jobs (needs heartbeat_client,
+        # notification_service, sse_manager, audit_logger — all created above)
+        if scheduler:
+            set_scheduler_deps(
+                pool, event_ledger=event_ledger,
+                heartbeat_client=heartbeat_client,
+                notification_service=notification_service,
+                sse_manager=sse_manager,
+                audit_logger=audit_logger,
             )
-        """,
-            tenant_id, invoice_id, helium_no, invoice_number, irn,
-            irn[:32].upper(), 'ISSUED', direction, 'COMMERCIAL_INVOICE', '380',
-            'B2B' if direction == 'INBOUND' else 'B2C',
-            issue_date, round(subtotal, 2), round(tax_amount, 2), total_amount,
-            'BANK_TRANSFER', 'COMMITTED', 'UNPAID',
-            tenant_id, seller_name, seller_tin, buyer_name,
-            product_summary, len(lines), source, source_id,
-            '2.1.3.0'
+            await register_ws7_jobs(
+                scheduler, pool,
+                heartbeat_client=heartbeat_client,
+                notification_service=notification_service,
+                sse_manager=sse_manager,
+                audit_logger=audit_logger,
+            )
+            await scheduler.start_in_background()
+
+        # WS6: Metrics collector (background gauge updates)
+        metrics_collector = MetricsCollector(
+            pool, interval=config.metrics_collect_interval
+        )
+        await metrics_collector.start()
+        app.state.metrics_collector = metrics_collector
+
+        # WS6: Set core_info Prometheus gauge
+        core_info.info({"version": __version__, "schema_version": "2.1.1.0"})
+
+        # WS1: Parser registry
+        parser_registry = create_default_registry()
+        app.state.parser_registry = parser_registry
+
+        # WS1: Queue scanner (safety-net background task)
+        queue_scanner = QueueScanner(
+            pool=pool,
+            config=config,
+            sse_manager=sse_manager,
+            heartbeat_client=heartbeat_client,
+            parser_registry=parser_registry,
+            audit_logger=audit_logger,
+            notification_service=notification_service,
+        )
+        await queue_scanner.start()
+        app.state.queue_scanner = queue_scanner
+
+        # WS4: Entity event listener (pg_notify → SSE)
+        entity_listener = EntityEventListener(pool, sse_manager)
+        await entity_listener.start()
+        app.state.entity_listener = entity_listener
+
+        # WS6: Audit system.startup
+        await audit_logger.log(
+            event_type="system.startup",
+            entity_type="system",
+            action="PROCESS",
+            metadata={"version": __version__, "port": config.port},
         )
 
-    # Publish SSE event
-    await _publish_event(request.app.state, "invoice.created", {
-        "invoice_id": invoice_id,
-        "helium_invoice_no": helium_no,
-        "invoice_number": invoice_number,
-        "irn": irn,
-        "direction": direction,
-        "issue_date": issue_date,
-        "subtotal": round(subtotal, 2),
-        "tax_amount": round(tax_amount, 2),
-        "total_amount": total_amount,
-        "seller_name": seller_name,
-        "buyer_name": buyer_name,
-        "workflow_status": "COMMITTED",
-        "payment_status": "UNPAID",
-        "product_summary": product_summary,
-        "line_items_count": len(lines),
-        "source": source,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }, tenant_id)
+        logger.info(
+            "core_service_started",
+            version=__version__,
+            port=config.port,
+        )
 
-    logger.info(f"  → Invoice {invoice_number} stored (IRN: {irn}, direction: {direction})")
+        yield
 
-    return JSONResponse(status_code=201, content={
-        "status": "created",
-        "invoice_id": invoice_id,
-        "helium_invoice_no": helium_no,
-        "irn": irn,
-        "direction": direction,
-        "total_amount": total_amount,
-    })
+        # ── SHUTDOWN ─────────────────────────────────────────────────
+        # WS6: Audit system.shutdown
+        uptime = time.monotonic() - app.state.start_time
+        await audit_logger.log(
+            event_type="system.shutdown",
+            entity_type="system",
+            action="PROCESS",
+            metadata={"uptime_seconds": round(uptime, 1)},
+        )
+        await metrics_collector.stop()
 
+        await entity_listener.stop()
+        await queue_scanner.stop()
+        await heartbeat_client.close()
+        if his_feedback_client:
+            await his_feedback_client.close()
+        if scheduler:
+            try:
+                await scheduler.__aexit__(None, None, None)
+            except Exception:
+                pass
+        await sse_manager.stop_heartbeat()
+        await sse_manager.drain()
+        await close_pool(pool)
+        logger.info("core_service_stopped")
 
-# ── GET /api/sync/full — Bulk-load for Float SyncClient ─────────────────────
-
-@app.get("/api/sync/full")
-async def sync_full(
-    request: Request,
-    tenant_id: str = Query("abbey"),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(500, ge=1, le=500),
-):
-    """
-    Return all invoices for a tenant — used by Float's full_sync().
-    Each invoice is delivered as an invoice.created event structure.
-    """
-    pool: asyncpg.Pool = request.app.state.pool
-    offset = (page - 1) * per_page
-
-    count_row = await pool.fetchrow(
-        "SELECT COUNT(*) as total FROM invoices WHERE tenant_id = $1 AND deleted_at IS NULL", tenant_id
+    app = FastAPI(
+        title="Helium Core Service",
+        version=__version__,
+        lifespan=lifespan,
     )
-    total = count_row["total"]
 
-    rows = await pool.fetch("""
-        SELECT invoice_id, helium_invoice_no, invoice_number, irn,
-               direction, document_type, transaction_type,
-               issue_date, subtotal, tax_amount, total_amount,
-               workflow_status, transmission_status, payment_status,
-               seller_name, seller_tin, buyer_name, buyer_tin,
-               product_summary, line_items_count, source, created_at
-        FROM invoices
-        WHERE tenant_id = $1 AND deleted_at IS NULL
-        ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3
-    """, tenant_id, per_page, offset)
+    # Middleware (LIFO order: last added = outermost = runs first)
+    app.add_middleware(TraceIDMiddleware)
+    app.add_middleware(RequestLoggingMiddleware)
+    configure_cors(app, config)
+    app.add_middleware(EntityAuditMiddleware)  # WS6: entity CRUD audit
+    app.add_middleware(PrometheusMiddleware)  # outermost — wraps all requests
 
-    items = []
-    for row in rows:
-        item = dict(row)
-        for k, v in item.items():
-            if hasattr(v, 'isoformat'):
-                item[k] = v.isoformat()
-        items.append(item)
+    # Error handler
+    @app.exception_handler(CoreError)
+    async def core_error_handler(request: Request, exc: CoreError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.to_dict(),
+        )
 
-    return {
-        "items": items,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page if total > 0 else 0,
-        "has_more": (page * per_page) < total,
-    }
+    # Routers
+    app.include_router(health_router)
+    app.include_router(sse_router)
+    app.include_router(ingestion_router)
 
+    # WS4: Entity CRUD + Search routers
+    app.include_router(invoices_router)
+    app.include_router(customers_router)
+    app.include_router(inventory_router)
+    app.include_router(entities_router)
+    app.include_router(search_router)
 
-# ── GET /api/v1/invoices — Paginated list ───────────────────────────────────
+    # WS6: Observability (audit, notifications, metrics)
+    app.include_router(observability_router)
 
-@app.get("/api/v1/invoices")
-async def list_invoices(
-    request: Request,
-    tenant_id: str = Query("abbey"),
-    direction: str = Query(None),
-    status: str = Query(None),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-):
-    pool: asyncpg.Pool = request.app.state.pool
-    where = ["tenant_id = $1", "deleted_at IS NULL"]
-    params = [tenant_id]
-    idx = 2
+    # WS7: Reports & Statistics
+    app.include_router(reports_router)
+    app.include_router(statistics_router)
 
-    if direction:
-        where.append(f"direction = ${idx}")
-        params.append(direction)
-        idx += 1
-    if status:
-        where.append(f"workflow_status = ${idx}")
-        params.append(status)
-        idx += 1
+    # Webhook (HeartBeat config change notifications)
+    app.include_router(webhook_router)
 
-    where_clause = " AND ".join(where)
-    offset = (page - 1) * per_page
-
-    total = (await pool.fetchrow(f"SELECT COUNT(*) as c FROM invoices WHERE {where_clause}", *params))["c"]
-    rows = await pool.fetch(f"""
-        SELECT * FROM invoices WHERE {where_clause}
-        ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx+1}
-    """, *params, per_page, offset)
-
-    items = []
-    for row in rows:
-        item = dict(row)
-        for k, v in item.items():
-            if hasattr(v, 'isoformat'):
-                item[k] = v.isoformat()
-        items.append(item)
-
-    return {"items": items, "total": total, "page": page, "per_page": per_page}
-
-
-# ── GET /api/v1/invoice/:id ─────────────────────────────────────────────────
-
-@app.get("/api/v1/invoice/{invoice_id}")
-async def get_invoice(invoice_id: str, request: Request):
-    pool: asyncpg.Pool = request.app.state.pool
-    row = await pool.fetchrow("SELECT * FROM invoices WHERE invoice_id = $1", invoice_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    result = dict(row)
-    for k, v in result.items():
-        if hasattr(v, 'isoformat'):
-            result[k] = v.isoformat()
-    return result
+    return app

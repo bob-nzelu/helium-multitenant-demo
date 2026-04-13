@@ -1,17 +1,13 @@
 # Helium Multi-Tenant Demo Stack
-# Full service deployment: Relay + HeartBeat + Core + Simulator + PostgreSQL + Redis
-#
-# Usage:
-#   cp .env.example .env    # fill in credentials
-#   docker-compose up -d
+# Canonical Helium services deployment with multi-tenant awareness
 #
 # Services:
-#   postgres:  5432  — shared PostgreSQL (tenant_id scoping)
-#   redis:     6379  — rate limiting, caching
+#   postgres:  5432  — shared PostgreSQL (tenant_id scoping, Option B)
+#   redis:     6379  — rate limiting, caching, queues
 #   heartbeat: 9000  — blob store, config, auth, SSE relay
-#   relay-api: 8082  — ingestion gateway (HMAC auth)
-#   core:      8080  — transformation engine (mock processing + real SSE)
-#   simulator: 8090  — demo data generator (catalog-based)
+#   relay-api: 8082  — ingestion gateway (HMAC auth, per-tenant pydantic)
+#   core:      8080  — transformation engine
+#   simulator: 8090  — demo data generator (catalog-based, dedicated session)
 
 services:
   # ── PostgreSQL ─────────────────────────────────────────────────────
@@ -43,7 +39,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── HeartBeat (blob store, config, auth, SSE relay) ────────────────
+  # ── HeartBeat ──────────────────────────────────────────────────────
   heartbeat:
     build:
       context: ./services/heartbeat
@@ -58,13 +54,11 @@ services:
       - HEARTBEAT_AUTH_ENABLED=false
       - HEARTBEAT_AUTO_MIGRATE=true
       - HEARTBEAT_TIER=test
-      - HEARTBEAT_COMPANY_ID=abbey
       - HEARTBEAT_PG_HOST=postgres
       - HEARTBEAT_PG_PORT=5432
       - HEARTBEAT_PG_USER=${PG_USER:-helium}
       - HEARTBEAT_PG_PASSWORD=${PG_PASSWORD:-helium_demo_2026}
       - HEARTBEAT_PG_DATABASE=${PG_DATABASE:-helium}
-      - HEARTBEAT_INTERNAL_SERVICE_TOKEN=${INTERNAL_TOKEN:-dev-token-123}
     volumes:
       - heartbeat-data:/app/databases
       - heartbeat-blobs:/app/data/blobs
@@ -78,7 +72,7 @@ services:
       retries: 3
       start_period: 15s
 
-  # ── Relay API (ingestion gateway) ──────────────────────────────────
+  # ── Relay API ──────────────────────────────────────────────────────
   relay-api:
     build:
       context: ./services/relay
@@ -87,7 +81,7 @@ services:
     environment:
       - RELAY_HOST=0.0.0.0
       - RELAY_PORT=8082
-      - RELAY_INSTANCE_ID=relay-demo-1
+      - RELAY_INSTANCE_ID=relay-helium-1
       - RELAY_REQUIRE_ENCRYPTION=false
       - RELAY_HEARTBEAT_API_URL=http://heartbeat:9000
       - RELAY_CORE_API_URL=http://core:8080
@@ -99,7 +93,6 @@ services:
       - RELAY_MAX_FILE_SIZE_MB=10.0
       - RELAY_WORKERS=1
       - RELAY_MALWARE_SCAN_ENABLED=false
-      - RELAY_INTERNAL_SERVICE_TOKEN=${INTERNAL_TOKEN:-dev-token-123}
     volumes:
       - ./config/tenants.json:/app/tenants.json:ro
     depends_on:
@@ -114,7 +107,7 @@ services:
       retries: 3
       start_period: 10s
 
-  # ── Core (transformation engine — mock processing + real SSE) ──────
+  # ── Core ───────────────────────────────────────────────────────────
   core:
     build:
       context: ./services/core
@@ -123,12 +116,9 @@ services:
     environment:
       - CORE_DATABASE_URL=postgresql://${PG_USER:-helium}:${PG_PASSWORD:-helium_demo_2026}@postgres:5432/${PG_DATABASE:-helium}
       - CORE_HEARTBEAT_URL=http://heartbeat:9000
-      - CORE_INTERNAL_TOKEN=${INTERNAL_TOKEN:-dev-token-123}
       - CORE_PORT=8080
     depends_on:
       postgres:
-        condition: service_healthy
-      heartbeat:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health')"]
@@ -137,7 +127,7 @@ services:
       retries: 3
       start_period: 10s
 
-  # ── Simulator (demo data generator) ────────────────────────────────
+  # ── Simulator (shell — built in dedicated session) ─────────────────
   simulator:
     build:
       context: ./services/simulator

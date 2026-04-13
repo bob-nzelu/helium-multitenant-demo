@@ -7,7 +7,6 @@ BodyCacheMiddleware: Pre-reads and caches raw body so both HMAC auth and
 relay_error_handler: Catches RelayError and returns structured JSON.
 """
 
-import asyncio
 import logging
 from typing import Any, Callable
 
@@ -54,19 +53,15 @@ class BodyCacheMiddleware:
             scope["state"] = {}
         scope["state"]["raw_body"] = body
 
-        # Replace receive with a callable that replays the cached body.
-        # After body is replayed, block forever instead of returning disconnect —
-        # returning disconnect immediately kills StreamingResponse (SSE streams).
+        # Replace receive with a callable that replays the cached body
         body_sent = False
-        disconnect_event = asyncio.Event()
 
         async def cached_receive() -> Message:
             nonlocal body_sent
             if not body_sent:
                 body_sent = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            # Block until the client actually disconnects (or server shuts down)
-            await disconnect_event.wait()
+            # After body is sent, return disconnect
             return {"type": "http.disconnect"}
 
         await self.app(scope, cached_receive, send)

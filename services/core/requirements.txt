@@ -1,5 +1,30 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-asyncpg==0.30.0
-httpx==0.27.2
-pydantic==2.9.2
+# Runtime
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+psycopg[binary]>=3.2.0
+psycopg-pool>=3.2.0
+sse-starlette>=2.1.0
+PyJWT[crypto]>=2.9.0
+apscheduler>=4.0.0a5
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+structlog>=24.4.0
+prometheus-client>=0.21.0
+uuid6>=2024.7.10
+httpx>=0.27.0
+
+# WS1 — Ingestion parsers
+openpyxl>=3.1.0
+lxml>=5.0.0
+
+# WS7 — Report generation
+weasyprint>=62.0
+
+# Development
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-cov>=6.0.0
+pytest-timeout>=2.3.0
+respx>=0.21.0
+ruff>=0.8.0
+mypy>=1.13.0

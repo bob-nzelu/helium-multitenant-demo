@@ -16,7 +16,6 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
-import httpx
 from uuid6 import uuid7
 
 from .base import BaseClient
@@ -66,49 +65,25 @@ class CoreClient(BaseClient):
         """
         Enqueue a file for Core processing.
 
-        Phase 2: Actually calls Core /api/v1/process if core_api_url is set.
-        Falls back to stub if Core is unreachable (graceful degradation).
+        Args:
+            blob_uuid: Blob UUID from HeartBeat.
+            filename: Original filename.
+            file_size_bytes: File size in bytes.
+            batch_id: Batch identifier.
+            metadata: SDK identity/trace fields (for Core traceability).
+            jwt_token: Bearer JWT for user identity verification.
+
+        Returns:
+            {"queue_id": str, "status": "queued", "batch_id": str}
+
+        Raises:
+            CoreUnavailableError: If Core is unreachable.
         """
         async def _enqueue():
-            # If Core URL is configured, call it
-            if self.core_api_url and self.core_api_url.strip():
-                try:
-                    async with httpx.AsyncClient(timeout=self.timeout) as client:
-                        resp = await client.post(
-                            f"{self.core_api_url}/api/v1/process",
-                            json={
-                                "blob_uuid": blob_uuid,
-                                "data_uuid": blob_uuid,
-                                "filenames": [filename],
-                                "file_size_bytes": file_size_bytes,
-                                "batch_id": batch_id,
-                                "trace_id": self.trace_id or str(uuid7()),
-                                "tenant_id": (metadata or {}).get("tenant_id", "abbey"),
-                                "metadata": metadata,
-                            },
-                        )
-                        if resp.status_code in (200, 201):
-                            result = resp.json()
-                            logger.info(
-                                f"Core process OK — queue_id={result.get('queue_id', '?')}",
-                                extra={"trace_id": self.trace_id},
-                            )
-                            return {
-                                "queue_id": result.get("queue_id", f"queue_{uuid7()}"),
-                                "status": result.get("status", "processed"),
-                                "batch_id": batch_id,
-                                "blob_uuid": blob_uuid,
-                                "preview_data": result.get("preview_data"),
-                            }
-                        else:
-                            logger.warning(f"Core returned {resp.status_code}: {resp.text[:200]}")
-                except Exception as e:
-                    logger.warning(f"Core call failed (graceful degradation): {e}")
-
-            # Fallback: stub response
+            # Phase 1 stub — returns mock response
             queue_id = f"queue_{uuid7()}"
             logger.debug(
-                f"Core enqueue (stub fallback) — queue_id={queue_id}",
+                f"Core enqueue (stub) — queue_id={queue_id}",
                 extra={"trace_id": self.trace_id},
             )
             return {

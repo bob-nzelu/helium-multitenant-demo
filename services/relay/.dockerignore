@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+htmlcov/
+.coverage
+.env
+tests/
+Documentation/
+archive/
+*.tmp.driveupload/
+.git/
+.gitignore

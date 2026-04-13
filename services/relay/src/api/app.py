@@ -14,22 +14,20 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import RelayConfig
 from ..config_cache import ConfigCache
 from ..clients.core import CoreClient
 from ..clients.heartbeat import HeartBeatClient
 from ..clients.redis_client import RedisClient
+from ..core.irn import IRNGenerator
 from ..core.module_cache import TransformaModuleCache
-from ..core.tenant import TenantConfig, load_tenants
+from ..core.qr import QRGenerator
 from ..errors import RelayError
-from ..services.batch_store import BatchStore
 from ..services.bulk import BulkService
 from ..services.external import ExternalService
 from ..services.ingestion import IngestionService
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
-from .routes.batches import router as batches_router
 from .routes.health import router as health_router
 from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
@@ -40,14 +38,14 @@ logger = logging.getLogger(__name__)
 
 def create_app(
     config: Optional[RelayConfig] = None,
-    tenant_registry: Optional[Dict[str, TenantConfig]] = None,
+    api_key_secrets: Optional[Dict[str, str]] = None,
 ) -> FastAPI:
     """
     Create and configure the Relay-API FastAPI application.
 
     Args:
         config: RelayConfig (defaults to from_env()).
-        tenant_registry: API key → TenantConfig mapping (defaults to tenants.json or env).
+        api_key_secrets: API key → secret mapping (defaults to empty).
 
     Returns:
         Configured FastAPI app, ready to run.
@@ -55,25 +53,14 @@ def create_app(
     if config is None:
         config = RelayConfig.from_env()
 
-    if tenant_registry is None:
-        tenants_file = os.environ.get("RELAY_TENANTS_FILE", "")
-        if tenants_file and os.path.exists(tenants_file):
-            tenant_registry = load_tenants(tenants_file)
-            logger.info(f"Loaded {len(tenant_registry)} tenant(s) from {tenants_file}")
-        else:
-            # Fallback: single-tenant from RELAY_DEV_API_KEY/SECRET env vars
-            tenant_registry = {}
-            dev_key = os.environ.get("RELAY_DEV_API_KEY", "")
-            dev_secret = os.environ.get("RELAY_DEV_API_SECRET", "")
-            if dev_key and dev_secret:
-                tenant_registry[dev_key] = TenantConfig(
-                    tenant_id="dev",
-                    api_key=dev_key,
-                    api_secret=dev_secret,
-                    service_id="DEV",
-                    name="Dev Tenant",
-                )
-                logger.info(f"Loaded dev tenant from env: {dev_key[:8]}...")
+    if api_key_secrets is None:
+        api_key_secrets = {}
+        # Load dev API key from environment (for Docker / local testing)
+        dev_key = os.environ.get("RELAY_DEV_API_KEY", "")
+        dev_secret = os.environ.get("RELAY_DEV_API_SECRET", "")
+        if dev_key and dev_secret:
+            api_key_secrets[dev_key] = dev_secret
+            logger.info(f"Loaded dev API key: {dev_key[:8]}...")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -126,26 +113,15 @@ def create_app(
             logger.warning("Module cache NOT loaded — external flow will return 503")
 
         # Service layer
-        batch_store = BatchStore()
-        if config.database_url:
-            await batch_store.connect(config.database_url)
-            logger.info("BatchStore: PostgreSQL persistence enabled")
-        else:
-            logger.warning("BatchStore: no DATABASE_URL — running in-memory only (data lost on restart)")
-        ingestion     = IngestionService(config, heartbeat, core, redis_client=redis_client)
-        bulk_service  = BulkService(ingestion, core)
-        external_service = ExternalService(
-            ingestion,
-            core_client=core,
-            config=config,
-            redis_client=redis_client,
-            batch_store=batch_store,
-        )
+        ingestion = IngestionService(config, heartbeat, core, redis_client=redis_client)
+        irn_gen = IRNGenerator(module_cache)
+        qr_gen = QRGenerator(module_cache)
+        bulk_service = BulkService(ingestion, core)
+        external_service = ExternalService(ingestion, core, irn_gen, qr_gen)
 
         # Store in app state
-        app.state.batch_store = batch_store
         app.state.config = config
-        app.state.tenant_registry = tenant_registry
+        app.state.api_key_secrets = api_key_secrets
         app.state.heartbeat = heartbeat
         app.state.core = core
         app.state.redis = redis_client
@@ -162,7 +138,6 @@ def create_app(
 
         # ── Shutdown ─────────────────────────────────────────────────
         logger.info("Relay-API shutting down")
-        await batch_store.close()
         await heartbeat.close()
         await redis_client.close()
         await module_cache.cleanup()
@@ -178,15 +153,8 @@ def create_app(
     # 1. TraceIDMiddleware: inject X-Trace-ID (inner)
     # 2. BodyCacheMiddleware: cache raw body so HMAC auth + form parsing
     #    can both read it without "Stream consumed" errors (outer)
-    # 3. CORSMiddleware: allow browser dashboard + AB MFB web clients (outermost)
     app.add_middleware(TraceIDMiddleware)
     app.add_middleware(BodyCacheMiddleware)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-    )
 
     # Error handlers
     app.add_exception_handler(RelayError, relay_error_handler)
@@ -195,7 +163,6 @@ def create_app(
     app.include_router(health_router)
     app.include_router(metrics_router)
     app.include_router(ingest_router)
-    app.include_router(batches_router)
     app.include_router(internal_router)
 
     return app

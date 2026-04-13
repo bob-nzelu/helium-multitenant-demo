@@ -13,7 +13,6 @@ from fastapi import Depends, Header, Request
 
 from ..config import RelayConfig
 from ..core.auth import authenticate
-from ..core.tenant import TenantConfig
 from ..crypto.envelope import decrypt as nacl_decrypt
 from ..errors import (
     AuthenticationFailedError,
@@ -48,29 +47,27 @@ async def authenticate_request(
     x_api_key: str = Header(..., description="API key for HMAC authentication"),
     x_timestamp: str = Header(..., description="ISO 8601 UTC timestamp (must be within 5 minutes)"),
     x_signature: str = Header(..., description="HMAC-SHA256 signature: sign(api_key:timestamp:sha256(body))"),
-) -> TenantConfig:
+) -> str:
     """
-    Authenticate request via HMAC-SHA256 and resolve tenant.
+    Authenticate request via HMAC-SHA256.
 
-    Returns the TenantConfig for the authenticated API key.
+    HMAC is computed over the RAW body (possibly encrypted).
+    Returns the validated API key.
+
+    Uses request._body if body was already consumed (e.g. by form parsing),
+    otherwise reads via request.body().
     """
+    # BodyCacheMiddleware stores the raw body in request.state.raw_body.
+    # We MUST use this instead of request.body() because the multipart
+    # form parser may have already consumed the stream.
     body = getattr(request.state, "raw_body", None)
     if body is None:
         body = await request.body()
 
-    tenant_registry: Dict[str, TenantConfig] = request.app.state.tenant_registry
+    api_key_secrets: Dict[str, str] = request.app.state.api_key_secrets
     trace_id = getattr(request.state, "trace_id", "")
 
-    # Look up tenant by API key
-    tenant = tenant_registry.get(x_api_key)
-    if tenant is None:
-        from ..errors import InvalidAPIKeyError
-        raise InvalidAPIKeyError()
-
-    # Build api_key_secrets for the auth function (backward compat)
-    api_key_secrets = {tenant.api_key: tenant.api_secret}
-
-    authenticate(
+    return authenticate(
         api_key=x_api_key,
         timestamp=x_timestamp,
         signature=x_signature,
@@ -78,8 +75,6 @@ async def authenticate_request(
         api_key_secrets=api_key_secrets,
         trace_id=trace_id,
     )
-
-    return tenant
 
 
 async def decrypt_body_if_needed(

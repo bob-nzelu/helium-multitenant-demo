@@ -72,30 +72,10 @@ class RelayConfig:
     module_cache_refresh_interval_s: int = 43200  # 12 hours
     internal_service_token: str = ""              # For /internal/ auth from HeartBeat
 
-    # ── PostgreSQL (batch result persistence) ────────────────────────────
-    database_url: str = ""              # e.g. postgresql://user:pass@host:5432/db
-
     # ── Redis (rate limiting) ───────────────────────────────────────────
     redis_url: str = ""                 # Empty = disabled (graceful degradation)
     redis_prefix: str = "relay"
     rate_limit_daily: int = 500         # Default daily uploads per company
-
-    # ── Field mapping (configurable per client) ──────────────────────────
-    # AB MFB may use different field names in their export.
-    # Set RELAY_FIELD_* to match their actual field names.
-    # Defaults match AB MFB's current field names — zero-config for them.
-    field_transaction_id: str = "transaction_id"   # unique ID per invoice record
-    field_fee_amount: str = "fee_amount"            # fee/charge amount
-    field_vat_amount: str = "vat_amount"            # VAT amount (optional, auto-7.5%)
-    field_vat_type: str = "vat_type"                # optional for demo
-    field_description: str = "description"          # transaction description
-    field_transaction_date: str = "transaction_date" # transaction date
-    field_branch: str = "branch"                    # optional audit field
-    field_batch_id: str = "batch_id"                # batch identifier
-    # B2B stubs — defined now, used post-demo
-    field_buyer_name: str = "buyer_name"            # B2B buyer name
-    field_buyer_tin: str = "buyer_tin"              # B2B buyer TIN
-    field_buyer_address: str = "buyer_address"      # B2B buyer address
 
     # ── Workers ──────────────────────────────────────────────────────────
     workers: int = 1                    # uvicorn --workers (production)
@@ -203,10 +183,6 @@ class RelayConfig:
         if v := env("INTERNAL_SERVICE_TOKEN"):
             kwargs["internal_service_token"] = v
 
-        # ── PostgreSQL
-        if v := env("DATABASE_URL"):
-            kwargs["database_url"] = v
-
         # ── Redis
         if v := env("REDIS_URL"):
             kwargs["redis_url"] = v
@@ -214,31 +190,6 @@ class RelayConfig:
             kwargs["redis_prefix"] = v
         if v := env("RATE_LIMIT_DAILY"):
             kwargs["rate_limit_daily"] = int(v)
-
-        # ── Field mapping
-        if v := env("FIELD_TRANSACTION_ID"):
-            kwargs["field_transaction_id"] = v
-        if v := env("FIELD_FEE_AMOUNT"):
-            kwargs["field_fee_amount"] = v
-        if v := env("FIELD_VAT_AMOUNT"):
-            kwargs["field_vat_amount"] = v
-        if v := env("FIELD_VAT_TYPE"):
-            kwargs["field_vat_type"] = v
-        if v := env("FIELD_DESCRIPTION"):
-            kwargs["field_description"] = v
-        if v := env("FIELD_TRANSACTION_DATE"):
-            kwargs["field_transaction_date"] = v
-        if v := env("FIELD_BRANCH"):
-            kwargs["field_branch"] = v
-        if v := env("FIELD_BATCH_ID"):
-            kwargs["field_batch_id"] = v
-        # B2B stubs
-        if v := env("FIELD_BUYER_NAME"):
-            kwargs["field_buyer_name"] = v
-        if v := env("FIELD_BUYER_TIN"):
-            kwargs["field_buyer_tin"] = v
-        if v := env("FIELD_BUYER_ADDRESS"):
-            kwargs["field_buyer_address"] = v
 
         # ── Workers
         if v := env("WORKERS"):

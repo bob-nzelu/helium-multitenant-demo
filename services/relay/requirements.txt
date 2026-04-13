@@ -33,6 +33,3 @@ uuid6>=2.0.0
 
 # Rate limiting (optional — graceful degradation when unavailable)
 redis[hiredis]>=5.0.0
-
-# PostgreSQL (batch result persistence)
-asyncpg>=0.29.0

@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: helium_core
+      POSTGRES_USER: helium
+      POSTGRES_PASSWORD: helium_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helium -d helium_core"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  core:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      CORE_DB_HOST: postgres
+      CORE_DB_PORT: "5432"
+      CORE_DB_NAME: helium_core
+      CORE_DB_USER: helium
+      CORE_DB_PASSWORD: helium_dev
+      CORE_HOST: "0.0.0.0"
+      CORE_PORT: "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  default:
+    name: helium_core
+
+volumes:
+  pgdata:

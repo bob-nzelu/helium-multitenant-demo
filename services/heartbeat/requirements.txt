@@ -4,7 +4,6 @@
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
-python-multipart>=0.0.6
 
 # Password hashing (API key management)
 bcrypt>=4.0.0

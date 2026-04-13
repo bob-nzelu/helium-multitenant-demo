@@ -581,10 +581,6 @@ app.include_router(lifecycle_router)
 app.include_router(primary_router)
 app.include_router(satellite_router)
 
-# Event Publishing (Core/Edge → HeartBeat SSE pipeline)
-from .api.internal.events_publish import router as events_publish_router
-app.include_router(events_publish_router)
-
 # Prometheus Metrics (P2-A — unauthenticated scrape endpoint)
 app.include_router(prometheus_router)
 
