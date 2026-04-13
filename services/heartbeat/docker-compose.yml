@@ -1,0 +1,26 @@
+services:
+  # ── HeartBeat Primary ──────────────────────────────────────────
+  heartbeat:
+    build: .
+    ports:
+      - "9000:9000"      # HeartBeat API (Relay connects here)
+    environment:
+      - HEARTBEAT_MODE=primary
+      - HEARTBEAT_HOST=0.0.0.0
+      - HEARTBEAT_PORT=9000
+      - HEARTBEAT_BLOB_STORAGE_ROOT=/app/data/blobs
+      - HEARTBEAT_DEFAULT_DAILY_LIMIT=1000
+      - HEARTBEAT_AUTH_ENABLED=false
+    volumes:
+      - heartbeat-data:/app/databases
+      - heartbeat-blobs:/app/data/blobs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:9000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  heartbeat-data:
+  heartbeat-blobs:

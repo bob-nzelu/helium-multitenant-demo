@@ -1,0 +1,35 @@
+services:
+  relay-api:
+    build: .
+    ports:
+      - "8082:8082"
+    environment:
+      - RELAY_HOST=0.0.0.0
+      - RELAY_PORT=8082
+      - RELAY_INSTANCE_ID=relay-docker-1
+      - RELAY_REQUIRE_ENCRYPTION=false
+      - RELAY_INTERNAL_SERVICE_TOKEN=dev-token-123
+      - RELAY_DEV_API_KEY=test-key-001
+      - RELAY_DEV_API_SECRET=test-secret-001
+      - RELAY_REDIS_URL=redis://redis:6379/0
+      - RELAY_RATE_LIMIT_DAILY=500
+      - RELAY_WORKERS=1
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8082/docs')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

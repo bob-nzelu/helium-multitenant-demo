@@ -46,7 +46,7 @@ services:
   # ── HeartBeat (blob store, config, auth, SSE relay) ────────────────
   heartbeat:
     build:
-      context: ../AB Microfinance/Demo/HeartBeat
+      context: ./services/heartbeat
     ports:
       - "9000:9000"
     environment:
@@ -81,7 +81,7 @@ services:
   # ── Relay API (ingestion gateway) ──────────────────────────────────
   relay-api:
     build:
-      context: ../AB Microfinance/Demo/Relay
+      context: ./services/relay
     ports:
       - "8082:8082"
     environment:
