@@ -28,3 +28,4 @@ pytest-timeout>=2.3.0
 respx>=0.21.0
 ruff>=0.8.0
 mypy>=1.13.0
+python-multipart>=0.0.7
