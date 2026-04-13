@@ -1,13 +1,5 @@
-# Helium Multi-Tenant Demo Stack
-# Canonical Helium services deployment with multi-tenant awareness
-#
-# Services:
-#   postgres:  5432  — shared PostgreSQL (tenant_id scoping, Option B)
-#   redis:     6379  — rate limiting, caching, queues
-#   heartbeat: 9000  — blob store, config, auth, SSE relay
-#   relay-api: 8082  — ingestion gateway (HMAC auth, per-tenant pydantic)
-#   core:      8080  — transformation engine
-#   simulator: 8090  — demo data generator (catalog-based, dedicated session)
+# Helium Multi-Tenant Infrastructure — Full Stack
+# 8 services: postgres, redis, heartbeat, relay-api, core, edge, his, simulator
 
 services:
   # ── PostgreSQL ─────────────────────────────────────────────────────
@@ -22,6 +14,8 @@ services:
     volumes:
       - pg-data:/var/lib/postgresql/data
       - ./config/schemas/001_all_tables.sql:/docker-entrypoint-initdb.d/001_all_tables.sql:ro
+      - ./config/schemas/002_auth_schema.sql:/docker-entrypoint-initdb.d/002_auth_schema.sql:ro
+      - ./config/schemas/003_seed_abbey_user.sql:/docker-entrypoint-initdb.d/003_seed_abbey_user.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-helium}"]
       interval: 10s
@@ -51,7 +45,7 @@ services:
       - HEARTBEAT_PORT=9000
       - HEARTBEAT_BLOB_STORAGE_ROOT=/app/data/blobs
       - HEARTBEAT_DEFAULT_DAILY_LIMIT=1000
-      - HEARTBEAT_AUTH_ENABLED=false
+      - HEARTBEAT_AUTH_ENABLED=true
       - HEARTBEAT_MOCK_AUTH=true
       - HEARTBEAT_AUTO_MIGRATE=true
       - HEARTBEAT_TIER=test
@@ -108,10 +102,10 @@ services:
       retries: 3
       start_period: 10s
 
-  # ── Core ───────────────────────────────────────────────────────────
+  # ── Core (Canonical) ───────────────────────────────────────────────
   core:
     build:
-      context: ./services/core_mock
+      context: ./services/core
     ports:
       - "8080:8080"
     environment:
@@ -120,20 +114,55 @@ services:
       - CORE_DB_USER=${PG_USER:-helium}
       - CORE_DB_PASSWORD=${PG_PASSWORD:-helium_demo_2026}
       - CORE_DB_NAME=${PG_DATABASE:-helium}
+      - CORE_DB_POOL_MIN=2
+      - CORE_DB_POOL_MAX=10
       - CORE_HOST=0.0.0.0
       - CORE_PORT=8080
       - CORE_HEARTBEAT_URL=http://heartbeat:9000
+      - CORE_EDGE_URL=http://edge:8085
+      - CORE_HIS_BASE_URL=http://his:8500
+      - CORE_HIS_FEEDBACK_ENABLED=false
+      - CORE_LOG_LEVEL=INFO
+      - CORE_CORS_ORIGINS=*
     depends_on:
       postgres:
         condition: service_healthy
+      heartbeat:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health')"]
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/api/v1/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
-  # ── Simulator (shell — built in dedicated session) ─────────────────
+  # ── Edge (Stub) ────────────────────────────────────────────────────
+  edge:
+    build:
+      context: ./services/edge
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8085/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # ── HIS (Stub) ─────────────────────────────────────────────────────
+  his:
+    build:
+      context: ./services/his
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8500/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # ── Simulator ──────────────────────────────────────────────────────
   simulator:
     build:
       context: ./services/simulator
