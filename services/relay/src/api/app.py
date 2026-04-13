@@ -17,6 +17,7 @@ from fastapi import FastAPI
 
 from ..config import RelayConfig
 from ..config_cache import ConfigCache
+from ..core.tenant import load_tenants
 from ..clients.core import CoreClient
 from ..clients.heartbeat import HeartBeatClient
 from ..clients.redis_client import RedisClient
@@ -55,12 +56,27 @@ def create_app(
 
     if api_key_secrets is None:
         api_key_secrets = {}
-        # Load dev API key from environment (for Docker / local testing)
-        dev_key = os.environ.get("RELAY_DEV_API_KEY", "")
-        dev_secret = os.environ.get("RELAY_DEV_API_SECRET", "")
-        if dev_key and dev_secret:
-            api_key_secrets[dev_key] = dev_secret
-            logger.info(f"Loaded dev API key: {dev_key[:8]}...")
+
+        # Multi-tenant mode: load from tenants.json
+        if config.tenants_file:
+            try:
+                tenant_registry = load_tenants(config.tenants_file)
+                for api_key, tenant in tenant_registry.items():
+                    api_key_secrets[api_key] = tenant.api_secret
+                logger.info(f"Loaded {len(tenant_registry)} tenants from {config.tenants_file}")
+            except Exception as e:
+                logger.error(f"Failed to load tenants file: {e}")
+                tenant_registry = {}
+        else:
+            tenant_registry = {}
+
+        # Fallback: single dev API key from environment
+        if not api_key_secrets:
+            dev_key = os.environ.get("RELAY_DEV_API_KEY", "")
+            dev_secret = os.environ.get("RELAY_DEV_API_SECRET", "")
+            if dev_key and dev_secret:
+                api_key_secrets[dev_key] = dev_secret
+                logger.info(f"Loaded dev API key: {dev_key[:8]}...")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -122,6 +138,7 @@ def create_app(
         # Store in app state
         app.state.config = config
         app.state.api_key_secrets = api_key_secrets
+        app.state.tenant_registry = tenant_registry if config.tenants_file else {}
         app.state.heartbeat = heartbeat
         app.state.core = core
         app.state.redis = redis_client

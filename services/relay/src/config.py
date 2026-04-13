@@ -80,6 +80,9 @@ class RelayConfig:
     # ── Workers ──────────────────────────────────────────────────────────
     workers: int = 1                    # uvicorn --workers (production)
 
+    # ── Multi-tenant (demo infrastructure) ──────────────────────────────
+    tenants_file: str = ""                  # Path to tenants.json (empty = single-tenant mode)
+
     # ── Malware scanning ──────────────────────────────────────────────────
     malware_scan_enabled: bool = False
     malware_clamd_socket: str = ""
@@ -194,6 +197,10 @@ class RelayConfig:
         # ── Workers
         if v := env("WORKERS"):
             kwargs["workers"] = int(v)
+
+        # ── Multi-tenant
+        if v := env("TENANTS_FILE"):
+            kwargs["tenants_file"] = v
 
         # ── Malware scanning
         if v := env("MALWARE_SCAN_ENABLED"):
