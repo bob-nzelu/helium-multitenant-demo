@@ -1,7 +1,35 @@
 # Simulator Service — Contract & Boundaries
 
+## INSTRUCTIONS FOR THE DEDICATED SESSION
+
+**CRITICAL: Before writing any code or creating a plan, you MUST:**
+1. Read this ENTIRE document thoroughly
+2. Read ALL seed data files listed in the "Seed Data File Contents" section below
+3. Read the existing shell at `services/simulator/src/app.py`
+4. Ask the user ALL clarifying questions — painstakingly align mentally before planning
+5. Only after the user confirms alignment should you create a plan
+6. Only after the user approves the plan should you write code
+
+**Repo:** `C:\Users\PROBOOK\OneDrive\WestMetro\Pronalytics\helium-multitenant-demo`
+**GitHub:** `https://github.com/bob-nzelu/helium-multitenant-demo`
+**This file:** `services/simulator/SIMULATOR_CONTRACT.md`
+**Shell code:** `services/simulator/src/app.py` (FastAPI stubs, all return 501)
+**Seed data:** `data/abbey/` (fee_catalog.json, borrowers.json, suppliers.json, enterprises.json, branches.json, tenant_config.json)
+**Tenant config:** `config/tenants.json` (API keys + secrets for HMAC signing)
+
+**Live infrastructure (already deployed and healthy on EC2 13.247.224.147):**
+- HeartBeat: port 9000 (blob store, config, SSE)
+- Relay API: port 8082 (ingestion gateway, HMAC auth)
+- Core: port 8080 (transformation engine)
+- PostgreSQL: port 5432 (shared, tenant_id column scoping)
+- Redis: port 6379 (rate limiting)
+
+**Context:** This is a multi-tenant demo infrastructure for Helium (Nigerian e-Invoicing platform). The Simulator generates realistic invoice data for Abbey Mortgage Bank and sends it through the real pipeline. Abbey is a mortgage bank — their outbound invoices are mortgage fees (origination, valuation, legal, insurance, etc.) charged to borrowers. Their inbound invoices are from real Nigerian suppliers (IT, power, healthcare).
+
+---
+
 **Owner:** Dedicated session (not this one)
-**Depends on:** Relay API, Core API, PostgreSQL, seed data catalogs
+**Depends on:** Relay API, Core API, seed data catalogs
 **Port:** 8090
 **Framework:** FastAPI + uvicorn
 
@@ -375,3 +403,103 @@ services/simulator/
     ├── stream_manager.py     # Background stream management
     └── bad_calls.py          # Intentional error generation
 ```
+
+---
+
+## Relay API Contract (What the Simulator calls)
+
+### `POST /api/ingest` — Relay Ingestion Endpoint
+
+**Auth:** HMAC-SHA256 (3 headers: X-API-Key, X-Timestamp, X-Signature)
+**Content-Type:** `multipart/form-data`
+
+**Form fields:**
+- `files`: One `.json` file containing a JSON array of invoice records
+- `batch_id`: String identifier (e.g., `SIM-OUT-ABBEY-000001`)
+- `call_type`: `"external"`
+- `source`: `"Simulator"` (optional, defaults to "Demo API")
+
+**Response codes:**
+- `200 OK` — All records processed
+- `207 Multi-Status` — Some records duplicated or failed
+- `422 Unprocessable` — All records rejected
+- `401` — Auth failure (bad HMAC, expired timestamp, unknown key)
+- `429` — Rate limit exceeded
+
+**Success response (200/207):**
+```json
+{
+  "status": "ok|partial|rejected",
+  "batch_id": "SIM-OUT-ABBEY-000001",
+  "trace_id": "uuid",
+  "source": "Simulator",
+  "source_id": "ABBEY-2026-AQ1P6JMS",
+  "summary": {
+    "total": 3,
+    "processed": 2,
+    "duplicates": 1,
+    "failed": 0
+  },
+  "processed": [
+    {
+      "transaction_id": "ABB-0000001",
+      "irn": "ABB0000001-A8BM72KQ-20260413",
+      "qr_code": "data:image/png;base64,...",
+      "data_uuid": "uuid",
+      "fee_amount": 250000.00,
+      "vat_amount": 18750.00,
+      "vat_computation": "exact"
+    }
+  ],
+  "duplicates": [...],
+  "failed": [...]
+}
+```
+
+### Core API Contract (for inbound invoices)
+
+### `POST /api/v1/ingest` — Core Ingestion Endpoint
+
+**Auth:** None (internal service, no HMAC needed)
+**Content-Type:** `application/json`
+
+**Request body:** UBL-format invoice JSON with additional fields:
+```json
+{
+  "direction": "INBOUND",
+  "source": "FIRS",
+  "source_id": "firs-delivery",
+  "tenant_id": "abbey",
+  ... (standard UBL fields)
+}
+```
+
+**Response (201):**
+```json
+{
+  "status": "created",
+  "invoice_id": "...",
+  "irn": "...",
+  "direction": "INBOUND"
+}
+```
+
+---
+
+## Seed Data Files Reference
+
+All files are in the repo at `data/abbey/`. The dedicated session should READ these files to understand the exact data shapes. Key files:
+
+| File | Records | Purpose |
+|------|---------|---------|
+| `fee_catalog.json` | 8 | Mortgage fee types with SKU, price ranges, VAT treatment |
+| `borrowers.json` | 20 | B2C mortgage borrowers (Nigerian names, Lagos/Abuja) |
+| `enterprises.json` | 3 | B2B corporate customers |
+| `suppliers.json` | 5 | Real Nigerian suppliers with invoice number format patterns |
+| `branches.json` | 5 | Abbey branch locations |
+| `tenant_config.json` | 1 | Abbey identity: TIN, FIRS service_id, address, API credentials |
+
+**`config/tenants.json`** has the HMAC credentials:
+- Abbey API key: `ABBEY-2026-AQ1P6JMS`
+- Abbey API secret: `Ysas2LCrs0ttlwm0N5Y0u44OPABFn0yT`
+- Abbey FIRS service_id: `A8BM72KQ` (used in IRN generation)
