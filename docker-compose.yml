@@ -111,7 +111,7 @@ services:
   # ── Core ───────────────────────────────────────────────────────────
   core:
     build:
-      context: ./services/core
+      context: ./services/core_mock
     ports:
       - "8080:8080"
     environment:
