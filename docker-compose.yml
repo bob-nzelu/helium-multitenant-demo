@@ -33,6 +33,27 @@ services:
       timeout: 5s
       retries: 3
 
+  # ── RabbitMQ (Message Broker — core_queue + edge_queue + DLQs) ────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-helium}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-helium_mq_2026}
+      RABBITMQ_DEFAULT_VHOST: helium
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./config/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./config/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
   # ── HeartBeat ──────────────────────────────────────────────────────
   heartbeat:
     build:
@@ -88,12 +109,16 @@ services:
       - RELAY_MAX_FILE_SIZE_MB=10.0
       - RELAY_WORKERS=1
       - RELAY_MALWARE_SCAN_ENABLED=false
+      - RELAY_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/helium
+      - RELAY_CORE_QUEUE=core_queue
     volumes:
       - ./config/tenants.json:/app/tenants.json:ro
     depends_on:
       heartbeat:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8082/health')"]
@@ -124,10 +149,15 @@ services:
       - CORE_HIS_FEEDBACK_ENABLED=false
       - CORE_LOG_LEVEL=INFO
       - CORE_CORS_ORIGINS=*
+      - CORE_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/helium
+      - CORE_CORE_QUEUE=core_queue
+      - CORE_EDGE_QUEUE=edge_queue
     depends_on:
       postgres:
         condition: service_healthy
       heartbeat:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/api/v1/health')"]
@@ -200,3 +230,4 @@ volumes:
   pg-data:
   heartbeat-data:
   heartbeat-blobs:
+  rabbitmq-data:
