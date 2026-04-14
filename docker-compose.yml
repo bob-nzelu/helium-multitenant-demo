@@ -109,16 +109,12 @@ services:
       - RELAY_MAX_FILE_SIZE_MB=10.0
       - RELAY_WORKERS=1
       - RELAY_MALWARE_SCAN_ENABLED=false
-      - RELAY_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/
-      - RELAY_CORE_QUEUE=core_queue
     volumes:
       - ./config/tenants.json:/app/tenants.json:ro
     depends_on:
       heartbeat:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8082/health')"]
@@ -172,6 +168,12 @@ services:
       context: ./services/edge
     ports:
       - "8085:8085"
+    environment:
+      - EDGE_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/
+      - EDGE_QUEUE=edge_queue
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')"]
       interval: 30s
