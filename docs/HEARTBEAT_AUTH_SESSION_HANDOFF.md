@@ -1,114 +1,85 @@
-# HeartBeat Auth + Registration — Dedicated Session Handoff
+# HeartBeat Auth + Registration — AWS Session Handoff (v2)
 
 **Date:** 14 April 2026
 **For:** Dedicated HeartBeat_AWS session
 **Repo:** `C:\Users\PROBOOK\OneDrive\WestMetro\Pronalytics\helium-multitenant-demo`
-**GitHub:** `https://github.com/bob-nzelu/helium-multitenant-demo`
+**Supersedes:** Previous version of this file (v1, same date)
 
 ---
 
 ## INSTRUCTIONS
 
-**Before writing any code or plan, you MUST:**
-1. Read this ENTIRE document
-2. Read `docs/UNIFIED_AUTH_CONTRACT.md` (the auth architecture spec)
-3. Read the existing HeartBeat auth code (file paths below)
-4. Ask the user ALL clarifying questions — align mentally before planning
-5. Only after alignment should you create a plan
-6. Only after plan approval should you write code
-7. Test on live EC2 at 13.247.224.147 after each change
+**Before ANY code or plan, you MUST:**
+1. Read `docs/HELIUM_DEPLOYMENT_ARCHITECTURE.md` (master architecture — start here)
+2. Read `docs/UNIFIED_AUTH_CONTRACT.md` (auth decisions)
+3. Read this entire document
+4. Read the **Transforma Reader** codebase for auth patterns:
+   - `C:\Users\PROBOOK\OneDrive\WestMetro\Transforma\Reader\src\services\auth_service.py` (AuthManager, observer pattern)
+   - `C:\Users\PROBOOK\OneDrive\WestMetro\Transforma\Reader\src\services\auth.py` (PINManager)
+   - `C:\Users\PROBOOK\OneDrive\WestMetro\Transforma\Reader\src\services\session.py` (DPAPI session, shared with Float)
+   - `C:\Users\PROBOOK\OneDrive\WestMetro\Transforma\Reader\src\clients\heartbeat_client.py` (Reader → HeartBeat calls)
+   - `C:\Users\PROBOOK\OneDrive\WestMetro\Transforma\Reader\src\ui\login_page.py` (login UI)
+5. Read **Float's** auth:
+   - `C:\Users\PROBOOK\OneDrive\WestMetro\Helium\Float\App\src\sdk\auth\auth_provider.py` (JWT validation)
+6. Read HeartBeat's existing auth code:
+   - `services/heartbeat/src/api/auth.py` (endpoints)
+   - `services/heartbeat/src/handlers/auth_handler.py` (business logic)
+   - `services/heartbeat/src/database/pg_auth.py` (PostgreSQL ops)
+   - `services/heartbeat/src/auth/jwt_manager.py` (Ed25519 signing)
+7. Ask the user ALL clarifying questions — painstakingly
+8. Understand the **test harness** (elevated user flow, `~/.helium/test_harness_key`)
+9. Understand **multi-tenancy** (single PG, tenant_id scoping, demo vs production)
+
+---
+
+## CONTEXT: WHY THIS MATTERS
+
+HeartBeat's auth system serves EVERY frontend app in the ecosystem:
+- **Float** (desktop, PySide6) — bulk uploads, invoice management
+- **Transforma Reader** (desktop, PySide6) — PDF viewing, single-file submission
+- **Reader Mobile** (future) — field workers, approval flows
+- **Monitoring** (future) — dashboards, alerts
+
+These apps share sessions on the same machine, register independently with HeartBeat, and all use JWT for service calls. HeartBeat is the single auth authority.
+
+**Reader already has auth code** (AuthManager + PINManager + DPAPI session sharing). It talks to HeartBeat for login, refresh, and duplicate checks. The contract you implement here MUST work with Reader's existing `heartbeat_client.py` — don't break its expected response shapes.
 
 ---
 
 ## LIVE INFRASTRUCTURE
 
-| Service | Host | Port | Status |
-|---------|------|------|--------|
-| HeartBeat | 13.247.224.147 | 9000 | Running (MOCK_AUTH=true) |
-| PostgreSQL | 13.247.224.147 | 5432 | Running (auth schema seeded) |
-| Redis | 13.247.224.147 | 6379 | Running |
-| RabbitMQ | 13.247.224.147 | 5672/15672 | Running |
-| Relay | 13.247.224.147 | 8082 | Running |
-| Core | 13.247.224.147 | 8080 | Running |
-| Edge | 13.247.224.147 | 8085 | Running (stub) |
-| HIS | 13.247.224.147 | 8500 | Running (stub) |
-| SIS | 13.247.224.147 | 8501 | Running (stub) |
-| Simulator | 13.247.224.147 | 8090 | Running |
+EC2 13.247.224.147 — all services running and healthy.
 
 **SSH:** `ssh -i "C:\Users\PROBOOK\OneDrive\WestMetro\Pronalytics\AB Microfinance\helium-key.pem" ubuntu@13.247.224.147`
 
-**Deploy pattern:** Edit locally → `git push` → SSH → `cd helium-multitenant-demo && git pull && sudo docker compose build heartbeat && sudo docker compose up -d heartbeat`
+**Deploy:** `git push` → SSH → `cd helium-multitenant-demo && git pull && sudo docker compose build heartbeat && sudo docker compose up -d heartbeat`
+
+**Current auth state:** `HEARTBEAT_MOCK_AUTH=true` (mock returns hardcoded Charles Omoakin responses)
+
+**PostgreSQL auth schema:** Seeded with roles, permissions, Charles Omoakin user (password: `123456`, is_first_run: true)
 
 ---
 
-## WHAT EXISTS TODAY
-
-### PostgreSQL Auth Schema (already created, running)
-
-Tables in `auth` schema:
-- `auth.roles` — 4 roles seeded: Owner, Admin, Operator, Support
-- `auth.permissions` — 14 permissions seeded (including `*` wildcard)
-- `auth.role_permissions` — Owner=`*`, Admin=6 perms, Support=`health.read`
-- `auth.users` — Charles Omoakin seeded:
-  - user_id: `usr-abbey-owner-001`
-  - email: `Charles.Omoakin@abbeymortgagebank.com`
-  - password_hash: bcrypt of `123456`
-  - role_id: `Owner`
-  - tenant_id: `tenant-abbey-001`
-  - is_first_run: `true`
-- `auth.sessions` — empty (no active sessions)
-- `auth.password_history` — empty
-- `auth.step_up_policies` — 5 policies seeded
-
-Schema files: `config/schemas/002_auth_schema.sql`, `config/schemas/003_seed_abbey_user.sql`
-
-### HeartBeat Auth Code (canonical, fully built)
-
-| File | Purpose | Status |
-|------|---------|--------|
-| `services/heartbeat/src/api/auth.py` | FastAPI auth endpoints (login, refresh, logout, introspect, stepup, password/change) | **Complete** |
-| `services/heartbeat/src/handlers/auth_handler.py` | Business logic for all auth operations | **Complete** |
-| `services/heartbeat/src/database/pg_auth.py` | PostgreSQL queries (auth.* schema prefix) | **Complete** |
-| `services/heartbeat/src/auth/jwt_manager.py` | Ed25519 keypair management, JWT sign/verify | **Complete** |
-| `services/heartbeat/src/auth/dependencies.py` | FastAPI dependency injection (get_current_user_token, verify_service_credentials) | **Complete** |
-| `services/heartbeat/src/api/mock_auth.py` | Mock auth router (currently active) | **To be replaced** |
-
-### Mock Auth (currently active)
-
-HeartBeat runs with `HEARTBEAT_MOCK_AUTH=true`. In `src/main.py` line 530:
-```python
-if os.environ.get("HEARTBEAT_MOCK_AUTH", "").lower() in ("true", "1", "yes"):
-    from .api.mock_auth import router as mock_auth_router
-    app.include_router(mock_auth_router)
-else:
-    app.include_router(auth_router)
-```
-
-Mock auth returns fake JWTs (base64, not Ed25519 signed). All responses are hardcoded for Charles Omoakin.
-
----
-
-## WHAT TO BUILD
+## TASKS (ordered by dependency)
 
 ### Task 1: Switch to Real Auth
 
-1. Set `HEARTBEAT_MOCK_AUTH=false` in docker-compose.yml
-2. Ensure Ed25519 keys exist at `services/heartbeat/databases/keys/`
-   - If not, HeartBeat auto-generates them on first boot
-3. Rebuild HeartBeat, test login:
-   ```
-   curl -X POST http://13.247.224.147:9000/api/auth/login \
-     -H "Content-Type: application/json" \
-     -d '{"email":"Charles.Omoakin@abbeymortgagebank.com","password":"123456"}'
-   ```
-4. Expected: real Ed25519 JWT, `is_first_run: true`, cipher_text
+Set `HEARTBEAT_MOCK_AUTH=false` in docker-compose.yml. The real auth code is fully built — it just needs to be activated.
 
-**Risk:** If real auth fails, set `HEARTBEAT_MOCK_AUTH=true` to rollback instantly.
+**Verify:**
+```bash
+curl -X POST http://13.247.224.147:9000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"Charles.Omoakin@abbeymortgagebank.com","password":"123456"}'
+```
 
-### Task 2: Add Device Registration
+**Expected:** Real Ed25519 JWT, `is_first_run: true`, cipher_text.
 
-Create migration `config/schemas/004_devices.sql`:
+**Rollback:** Set `HEARTBEAT_MOCK_AUTH=true` if anything breaks.
 
+### Task 2: Add device_id to Login + Sessions
+
+**Schema change** (`config/schemas/004_devices.sql`):
 ```sql
 CREATE TABLE IF NOT EXISTS auth.devices (
     device_id       TEXT PRIMARY KEY,
@@ -126,382 +97,152 @@ CREATE TABLE IF NOT EXISTS auth.devices (
     revoked_at      TIMESTAMPTZ,
     revoked_by      TEXT
 );
-```
 
-Add `device_id` to sessions:
-```sql
 ALTER TABLE auth.sessions ADD COLUMN IF NOT EXISTS device_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_sessions_device ON auth.sessions(device_id);
 ```
 
-### Task 3: Add App Registration
+**Login change** (`auth_handler.py`): Accept optional `device_id` in request. Include in JWT claims. Store in session row.
 
-New endpoint: `POST /api/auth/register-app`
+### Task 3: 3-Session Limit
 
-**Request:**
-```json
-{
-  "source_type": "float",
-  "source_name": "Float_DESKTOP-PROBOOK",
-  "app_version": "2.0.0",
-  "machine_guid": "ABC123-DEF456",
-  "mac_address": "AA:BB:CC:DD:EE:FF",
-  "computer_name": "PROBOOK",
-  "os_type": "windows",
-  "os_version": "Windows 11 Pro",
-  "device_id": "a1b2c3d4e5f60001"
-}
+In `auth_handler.py` login():
+1. Count active sessions for user: `SELECT COUNT(*) FROM auth.sessions WHERE user_id=$1 AND is_revoked=false AND session_expires_at > NOW()`
+2. If >= 3: revoke oldest (`ORDER BY issued_at ASC LIMIT 1`)
+3. If device already has active session: revoke it (replace)
+
+### Task 4: App Registration Endpoint
+
+**New endpoint:** `POST /api/auth/register-app`
+
+See `HELIUM_DEPLOYMENT_ARCHITECTURE.md` Section 4 for full request/response contract.
+
+**Implementation:**
+- Create `auth.app_registrations` table (source_id, source_type, source_name, device_id, tenant_id, app_version, registered_at)
+- Generate source_id: `src-{source_type[:5]}-{device_id[:6]}-{sequence}`
+- Return tenant config + endpoints + capabilities + feature flags + security settings
+- Idempotent: same device_id + source_type → update last_seen, return existing source_id
+
+**Tenant config source:** HeartBeat's config.db / config_entries table. The response merges:
+- Tenant info from auth.users (tenant_id) → config_entries
+- Endpoints from config_entries (service_name → URL)
+- Capabilities from tier_limits (tenant tier → limits)
+- Feature flags from feature_flags table
+
+### Task 5: Device + Session Management Endpoints
+
+```
+GET  /api/auth/devices                — list registered devices for current user
+POST /api/auth/devices/{id}/revoke    — admin: revoke a device
+GET  /api/auth/sessions               — list active sessions for current user
 ```
 
-**Response:**
+### Task 6: Test Harness Security Model
+
+1. Generate key: `python -c "import secrets; open('test_harness_key','wb').write(secrets.token_bytes(32))"` → store at `~/.helium/test_harness_key` on Bob's laptop
+2. Create `services/heartbeat/src/auth/test_harness_manager.py`:
+   - Load key from env `HEARTBEAT_TEST_HARNESS_KEY_HASH` (SHA-256 of the key)
+   - Validate HMAC signature: `X-Test-Harness-Signature` header
+   - Constant-time comparison via `hmac.compare_digest()`
+3. Create `services/heartbeat/src/api/test_harness/endpoints.py`:
+   - `POST /api/test/auth/reset` — reset user to first-time login
+   - `POST /api/test/auth/create-user` — create test user on the fly
+   - `POST /api/test/data/seed` — seed sample data
+   - `POST /api/test/data/clear` — wipe tenant data (logged)
+   - `POST /api/test/sse/emit` — push custom SSE event
+   - `POST /api/test/config/override` — temporarily override config
+   - `GET /api/test/state` — dump system state for debugging
+4. Register conditionally: `HEARTBEAT_TEST_HARNESS_ENABLED=true`
+5. All test operations are audit-logged
+
+### Task 7: Update Engine (Foundation)
+
+Add update management endpoints:
+```
+POST /api/admin/updates/apply     — upload + apply update package
+GET  /api/admin/updates/status    — current update progress  
+GET  /api/admin/updates/history   — past updates
+POST /api/admin/updates/rollback  — rollback to previous version
+```
+
+This is the foundation — full implementation is a separate session, but the endpoints should exist (can return 501 for now except /history which returns empty list).
+
+---
+
+## READER HARMONY: WHAT NOT TO BREAK
+
+Reader's `heartbeat_client.py` expects these response shapes:
+
+**Login response:**
 ```json
 {
-  "source_id": "src-float-a1b2c3-001",
-  "source_type": "float",
-  "source_name": "Float_DESKTOP-PROBOOK",
-  "device_id": "a1b2c3d4e5f60001",
-  "registered_at": "2026-04-14T10:00:00Z",
-  "tenant": {
-    "tenant_id": "tenant-abbey-001",
-    "company_name": "Abbey Mortgage Bank PLC",
-    "tin": "02345678-0001",
-    "firs_service_id": "A8BM72KQ",
-    "invoice_prefix": "ABB"
-  },
-  "endpoints": {
-    "heartbeat": "http://13.247.224.147:9000",
-    "heartbeat_sse": "http://13.247.224.147:9000/api/sse/stream",
-    "relay": "http://13.247.224.147:8082",
-    "core": "http://13.247.224.147:8080",
-    "core_sse": "http://13.247.224.147:8080/api/v1/sse/subscribe"
-  },
-  "capabilities": {
-    "can_upload": true,
-    "can_finalize": true,
-    "max_file_size_mb": 10.0,
-    "allowed_extensions": [".pdf", ".xlsx", ".json", ".csv", ".xml"],
-    "bulk_preview_timeout_s": 300
-  },
-  "feature_flags": {
-    "sse_enabled": true,
-    "bulk_upload_enabled": true,
-    "inbound_review_enabled": true
-  },
-  "security": {
-    "session_timeout_hours": 8,
-    "jwt_refresh_minutes": 25,
-    "step_up_required_for": ["invoice.finalize", "user.create.admin"]
+  "access_token": "...",
+  "cipher_text": "...",    // Reader uses this for DPAPI
+  "user": {
+    "user_id": "...",
+    "role": "...",
+    "display_name": "...",
+    "tenant_id": "...",
+    "is_first_run": true
   }
 }
 ```
 
-**Idempotent:** Same device_id + source_type → return existing registration (update last_seen_at, app_version).
+**Password change response:**
+Reader expects `200 OK` with any body. On success, Reader clears local session and re-shows login.
 
-**Auth required:** Bearer JWT (from shared Keyring session or fresh login).
+**Token refresh:**
+Reader calls `POST /api/auth/refresh` (note: Reader uses `/refresh`, Float uses `/token/refresh`). HeartBeat should accept BOTH paths.
 
-### Task 4: Update Login to Accept device_id
+**Duplicate check:**
+Reader calls `GET /api/v1/heartbeat/blob/{hash}/status`. This is a HeartBeat blob endpoint, not auth — but ensure it works alongside auth changes.
 
-Modify `POST /api/auth/login` to accept optional `device_id` in request body.
+---
 
-In `auth_handler.py` login():
-1. If `device_id` provided → check device not revoked
-2. Create session with `device_id` column populated
-3. Include `device_id` in JWT claims
-4. Enforce: max 1 session per device (replace existing)
+## DPAPI SESSION SHARING (Reader ↔ Float)
 
-### Task 5: Enforce 3-Session Limit
+**Reader checks three locations for existing auth:**
+1. `~/.transforma/session.token.enc` (Reader's own DPAPI session)
+2. `C:\ProgramData\Helium\sessions\{user}.token.enc` (shared with Float)
+3. HeartBeat login (if neither found)
 
-In `auth_handler.py` login(), after password verification:
-```python
-active_count = await db.count_active_sessions(user_id)
-if active_count >= 3:
-    oldest = await db.get_oldest_active_session(user_id)
-    await db.revoke_session(oldest.session_id, reason="evicted_by_new_login")
-```
+**Float writes to location 2.** Reader reads from it. If found + valid → Reader skips login entirely.
 
-Update `pg_auth.py` with:
-- `count_active_sessions(user_id)` — COUNT WHERE is_revoked=false AND session_expires_at > now
-- `get_oldest_active_session(user_id)` — ORDER BY issued_at ASC LIMIT 1
-- Update `get_tenant_max_sessions()` to return 3 (currently returns 1)
+**HeartBeat implications:** The session token in these files must match what HeartBeat considers valid. When HeartBeat revokes a session (logout, password change, eviction), the DPAPI file becomes stale. Reader's next API call will get 401, triggering re-login.
 
-### Task 6: Add Device/Session Management Endpoints
+---
 
-```
-GET  /api/auth/devices              — list registered devices for current user
-POST /api/auth/devices/{id}/revoke  — revoke a device (admin only)
-GET  /api/auth/sessions             — list active sessions for current user
-```
+## MULTI-TENANCY NOTES
 
-### Task 7: Relay Dual-Auth (JWT + HMAC)
+**Demo (current AWS):** Multiple tenants in one PostgreSQL. HeartBeat auth tables have tenant_id. Login returns tenant_id in JWT. All downstream services scope by it.
 
-Modify Relay's auth middleware to accept JWT in addition to HMAC:
+**Production (tenant-controlled):** One HeartBeat per tenant. tenant_id is constant. Auth tables still have it (for consistency) but there's only one value.
 
-**File:** `services/relay/src/core/auth.py`
+**HeartBeat must work in both modes.** Don't hardcode tenant_id assumptions. Always read from the user's auth record.
 
-Add a new function:
-```python
-def authenticate_jwt_or_hmac(request, api_key_secrets, tenant_registry):
-    auth_header = request.headers.get("authorization", "")
-    
-    if auth_header.lower().startswith("bearer "):
-        # JWT path: verify via HeartBeat introspect
-        token = auth_header[7:]
-        result = httpx.post(heartbeat_url + "/api/auth/introspect", json={"token": token})
-        if result["active"]:
-            return tenant_from_jwt_claims(result)
-        raise AuthenticationFailedError()
-    
-    elif request.headers.get("x-api-key"):
-        # HMAC path: existing flow
-        return authenticate_hmac(request, api_key_secrets)
-    
-    raise AuthenticationFailedError("No auth credentials provided")
-```
+---
 
-**File:** `services/relay/src/api/routes/ingest.py`
+## INSTALLER AWARENESS
 
-Update the `Depends(authenticate_request)` to use the new dual-auth function.
+When a tenant deploys Helium:
+1. Installer runs `config/schemas/002_auth_schema.sql` + `003_seed_abbey_user.sql`
+2. HeartBeat starts, picks up the seeded user
+3. First Owner logs in with temp password → forced change
+4. Owner uses Float Admin to create additional users (Admin, Operator, Support)
 
-### Task 8: Test Harness (keep mock_auth as test tool)
-
-Rename `mock_auth.py` to be part of the test harness. The `/api/auth/reset` endpoint is useful — but guard it behind the test harness key (`~/.helium/test_harness_key`) instead of `HEARTBEAT_MOCK_AUTH` env var.
-
-See `docs/UNIFIED_AUTH_CONTRACT.md` Section 8 for test harness spec.
+HeartBeat's auth system must support this bootstrap flow. The `is_first_run` flag and `scope: "bootstrap"` JWT are critical for the Installer experience.
 
 ---
 
 ## VERIFICATION CHECKLIST
 
-After implementation, verify ALL of the following:
-
-1. **Real login works:**
-   ```
-   POST /api/auth/login {"email":"Charles.Omoakin@abbeymortgagebank.com","password":"123456"}
-   → 200, real Ed25519 JWT, is_first_run=true
-   ```
-
-2. **First-time password change:**
-   ```
-   POST /api/auth/password/change {"new_password":"SecurePass2026!"}
-   → 200, all sessions revoked
-   ```
-
-3. **Re-login with new password:**
-   ```
-   POST /api/auth/login {"email":"...","password":"SecurePass2026!","device_id":"test-dev-001"}
-   → 200, is_first_run=false, device_id in JWT
-   ```
-
-4. **Token refresh:**
-   ```
-   POST /api/auth/token/refresh (Bearer JWT)
-   → 200, new JWT, same session_expires_at
-   ```
-
-5. **Device registration:**
-   ```
-   POST /api/auth/register-app {...} (Bearer JWT)
-   → 200, source_id + config bundle
-   ```
-
-6. **3-session limit:**
-   Login from device A, B, C → all active.
-   Login from device D → device A's session revoked.
-
-7. **Simulator still works:**
-   ```
-   POST http://13.247.224.147:8090/api/single {"tenant_id":"abbey"}
-   → 200 (Simulator uses HMAC to Relay, NOT HeartBeat auth)
-   ```
-
-8. **Relay dual-auth:**
-   ```
-   # JWT path
-   POST /api/ingest (Authorization: Bearer {jwt}) → 200
-   
-   # HMAC path (Simulator)
-   POST /api/ingest (X-API-Key + X-Signature) → 200
-   ```
-
----
-
----
-
-## FRONTEND IMPLEMENTATION NOTES (Float + Reader Harmony)
-
-These notes are for the frontend teams. HeartBeat provides the backend — frontends must follow these patterns to share sessions correctly.
-
-### Keyring Contract
-
-All Helium desktop apps on the same machine share ONE Keyring entry:
-
-| Field | Value |
-|-------|-------|
-| **Service name** | `helium` |
-| **Account** | `session` |
-| **Value** | JSON string (see below) |
-
-```json
-{
-  "access_token": "eyJ...",
-  "cipher_text": "a1b2c3d4...",
-  "expires_at": "2026-04-14T10:30:00Z",
-  "session_expires_at": "2026-04-14T18:00:00Z",
-  "device_id": "a1b2c3d4e5f60001",
-  "heartbeat_url": "http://13.247.224.147:9000",
-  "user_id": "usr-abbey-owner-001",
-  "tenant_id": "tenant-abbey-001",
-  "role": "Owner",
-  "display_name": "Charles Omoakin",
-  "updated_at": "2026-04-14T10:00:00Z"
-}
-```
-
-**All apps MUST use the exact same service name and account** (`helium` / `session`). If Float writes with a different key name than Reader reads, session sharing breaks.
-
-### device_id Computation (MUST be identical across apps)
-
-Every app on the same machine MUST compute the same device_id:
-
-```python
-import hashlib
-import uuid
-import re
-
-def compute_device_id() -> str:
-    """Platform-specific machine identity → deterministic device_id."""
-    import platform
-    
-    if platform.system() == "Windows":
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
-              r"SOFTWARE\Microsoft\Cryptography")
-        machine_guid = winreg.QueryValueEx(key, "MachineGuid")[0]
-    elif platform.system() == "Darwin":
-        import subprocess
-        result = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-                                capture_output=True, text=True)
-        for line in result.stdout.split("\n"):
-            if "IOPlatformUUID" in line:
-                machine_guid = line.split('"')[-2]
-                break
-    else:  # Linux
-        machine_guid = open("/etc/machine-id").read().strip()
-    
-    # Get primary MAC address
-    mac = ':'.join(re.findall('..', '%012x' % uuid.getnode()))
-    
-    raw = f"{machine_guid}:{mac}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
-```
-
-**CRITICAL:** Float and Reader MUST use this exact same function. If they compute different device_ids, HeartBeat sees them as different devices and creates separate sessions (wasting the 3-session limit).
-
-### App Startup Sequence (EVERY Helium frontend app)
-
-```
-┌─────────────────────────────────────────────────┐
-│ 1. Compute device_id (machine_guid + mac)       │
-│                                                  │
-│ 2. Check Keyring: helium/session exists?         │
-│    ├── NO → goto STEP 5 (login required)        │
-│    └── YES → parse JSON                          │
-│                                                  │
-│ 3. Is session_expires_at > now?                  │
-│    ├── NO → delete Keyring → goto STEP 5        │
-│    └── YES → continue                            │
-│                                                  │
-│ 4. Is expires_at > now?                          │
-│    ├── NO → call POST /api/auth/token/refresh   │
-│    │    ├── 200 → update Keyring → goto STEP 6  │
-│    │    └── 401 → delete Keyring → goto STEP 5  │
-│    └── YES → goto STEP 6                        │
-│                                                  │
-│ 5. SHOW LOGIN DIALOG                            │
-│    → user enters email + password                │
-│    → POST /api/auth/login {email, pw, device_id}│
-│    → if is_first_run: show password change dialog│
-│    → write to Keyring → goto STEP 6             │
-│                                                  │
-│ 6. Check local store: app registration exists?   │
-│    ├── YES → proceed to main window              │
-│    └── NO → silent call:                         │
-│         POST /api/auth/register-app              │
-│         {source_type, device_id, machine_guid..} │
-│         → store registration locally             │
-│         → proceed to main window                 │
-│                                                  │
-│ 7. MAIN WINDOW — app is fully authenticated      │
-│    └── Start 25-min refresh timer                │
-│    └── On refresh: update Keyring                │
-│    └── On logout: delete Keyring + call logout   │
-└─────────────────────────────────────────────────┘
-```
-
-### source_type Values
-
-| App | source_type | source_name pattern |
-|-----|-------------|-------------------|
-| Float | `float` | `Float_{computer_name}` |
-| Transforma Reader (desktop) | `transforma_reader` | `TransformaReader_{computer_name}` |
-| Transforma Reader (mobile) | `transforma_reader_mobile` | `TransformaReader_{device_model}` |
-| Monitoring App | `monitoring` | `Monitor_{computer_name}` |
-
-### Registration Storage
-
-Each app stores its registration response in its OWN local storage (NOT the shared Keyring):
-
-| App | Storage Location |
-|-----|-----------------|
-| Float | `~/.helium/float/registration.json` |
-| Reader | `~/.helium/reader/registration.json` |
-| Mobile | App-specific secure storage |
-
-Registration data includes `source_id`, tenant config, endpoints, capabilities, feature flags.
-
-### Token Refresh Coordination
-
-When multiple apps are running on the same machine:
-- Each has its own 25-min refresh timer
-- Whichever fires first refreshes the token and updates Keyring
-- The other app reads the updated Keyring on its next API call
-- No file watcher or IPC needed — Keyring is the synchronization point
-
-**Edge case:** Both apps try to refresh at the same moment. HeartBeat handles this gracefully — the second refresh gets a new JWT (the first JWT's `jti` was already replaced). The second app updates Keyring, overwriting the first app's refresh. Both end up with valid tokens.
-
-### Logout Behavior
-
-| Action | Effect |
-|--------|--------|
-| User clicks Logout in Float | Float calls `POST /api/auth/logout` → deletes Keyring entry → shows login |
-| Reader detects missing Keyring | On next API call, Keyring read fails → Reader shows login dialog |
-| Session expires (8hr hard cap) | Next token refresh returns 401 → app deletes Keyring → shows login |
-| Admin revokes session | Next API call → introspect returns `active: false` → app deletes Keyring → shows login |
-
-### API Call Pattern (all services)
-
-Every frontend-to-service HTTP call includes the JWT:
-
-```python
-headers = {
-    "Authorization": f"Bearer {access_token}",
-    "X-Device-Id": device_id,
-    "X-Source-Id": source_id,
-    "X-Trace-Id": str(uuid.uuid7()),
-}
-```
-
-Services verify the JWT and extract:
-- `sub` → user_id
-- `tenant_id` → data scoping
-- `role` + `permissions` → authorization
-- `device_id` → audit trail
-
----
-
-## CRITICAL: DO NOT BREAK
-
-- Simulator must keep working (uses HMAC to Relay, not HeartBeat auth)
-- HeartBeat health endpoint must stay up
-- If real auth fails catastrophically, set `HEARTBEAT_MOCK_AUTH=true` as rollback
-- PostgreSQL auth schema already exists — do NOT recreate (use ALTER TABLE for new columns)
+1. Real login → Ed25519 JWT with device_id in claims
+2. First-time flow → is_first_run=true → password change → re-login → is_first_run=false
+3. Token refresh → new JWT, same session_expires_at
+4. 3-session limit → 4th device evicts oldest
+5. App registration → source_id + config bundle returned
+6. Test harness → HMAC-signed reset call works
+7. Simulator still works → HMAC to Relay, no HeartBeat auth involvement
+8. Reader login response shape → matches existing heartbeat_client.py expectations
+9. Reader `/refresh` path → works (alias for `/token/refresh`)
+10. DPAPI session file → valid JWT recognized by HeartBeat introspect
