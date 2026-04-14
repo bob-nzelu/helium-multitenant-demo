@@ -223,6 +223,38 @@ When ANY app on the machine refreshes the token:
 
 ---
 
+## 4B. AUTH METHOD PER CALLER
+
+**CRITICAL DECISION: Frontend apps NEVER receive HMAC credentials.**
+
+JWT for humans (frontend apps). HMAC for machines (ERP, Simulator).
+
+| Caller | → Service | Auth Method | Why |
+|--------|-----------|------------|-----|
+| Float → HeartBeat | JWT | User-scoped, revocable |
+| Float → Relay | **JWT** | User-scoped (Relay introspects via HeartBeat) |
+| Float → Core | JWT | User-scoped |
+| Float → Edge | JWT | User-scoped |
+| Float → HIS | JWT | User-scoped |
+| Reader → HeartBeat | JWT | Shared session from Keyring |
+| Reader → Relay | **JWT** | Same — no HMAC exposure |
+| Reader → Core | JWT | User-scoped |
+| Reader → SIS | JWT | User-scoped |
+| ERP system → Relay | **HMAC** | Machine identity, no human user |
+| Simulator → Relay | **HMAC** | Test tool, tenant-level |
+| Core → HeartBeat | Service token | Internal, service-to-service |
+| Core → Edge | Service token | Internal |
+| Core → HIS | Service token | Internal |
+
+**Relay accepts BOTH JWT and HMAC.** When a request arrives:
+1. Check for `Authorization: Bearer {jwt}` → if present, verify via HeartBeat introspect → extract tenant_id from claims
+2. Else check for `X-API-Key` + `X-Signature` → HMAC flow (existing)
+3. Neither → 401
+
+**Registration response does NOT include relay_credentials for frontend apps.** Only machine integrations (ERP, Simulator) receive HMAC credentials, and those are provisioned by Admin_Packager — not through the register-app endpoint.
+
+---
+
 ## 5. JWT CLAIMS
 
 ```json
