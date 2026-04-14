@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS auth.role_permissions (
 CREATE TABLE IF NOT EXISTS auth.user_permissions (
     user_id         TEXT NOT NULL REFERENCES auth.users(user_id),
     permission_id   TEXT NOT NULL REFERENCES auth.permissions(permission_id),
+    granted         BOOLEAN DEFAULT TRUE,
     granted_by      TEXT NOT NULL,
     granted_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at      TIMESTAMPTZ,
@@ -87,14 +88,14 @@ CREATE TABLE IF NOT EXISTS auth.sessions (
 
 -- Password History (recycling prevention)
 CREATE TABLE IF NOT EXISTS auth.password_history (
-    id          SERIAL PRIMARY KEY,
-    user_id     TEXT NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
-    hash        TEXT NOT NULL,
-    set_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              SERIAL PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+    password_hash   TEXT NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_pw_history_user_recent
-    ON auth.password_history(user_id, set_at DESC);
+    ON auth.password_history(user_id, created_at DESC);
 
 -- Step-up Policies
 CREATE TABLE IF NOT EXISTS auth.step_up_policies (
