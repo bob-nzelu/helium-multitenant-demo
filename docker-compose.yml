@@ -16,6 +16,7 @@ services:
       - ./config/schemas/001_all_tables.sql:/docker-entrypoint-initdb.d/001_all_tables.sql:ro
       - ./config/schemas/002_auth_schema.sql:/docker-entrypoint-initdb.d/002_auth_schema.sql:ro
       - ./config/schemas/003_seed_abbey_user.sql:/docker-entrypoint-initdb.d/003_seed_abbey_user.sql:ro
+      - ./config/schemas/004_devices.sql:/docker-entrypoint-initdb.d/004_devices.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-helium}"]
       interval: 10s
@@ -67,9 +68,12 @@ services:
       - HEARTBEAT_BLOB_STORAGE_ROOT=/app/data/blobs
       - HEARTBEAT_DEFAULT_DAILY_LIMIT=1000
       - HEARTBEAT_AUTH_ENABLED=true
-      - HEARTBEAT_MOCK_AUTH=true
+      - HEARTBEAT_MOCK_AUTH=false
       - HEARTBEAT_AUTO_MIGRATE=true
       - HEARTBEAT_TIER=test
+      - HEARTBEAT_MAX_CONCURRENT_SESSIONS=3
+      - HEARTBEAT_TEST_HARNESS_ENABLED=true
+      - HEARTBEAT_TEST_HARNESS_KEY_HASH=786ac05ff1f90d133056376fa0a65188cab837fe4450d47d1be924bd54d017d3
       - HEARTBEAT_PG_HOST=postgres
       - HEARTBEAT_PG_PORT=5432
       - HEARTBEAT_PG_USER=${PG_USER:-helium}

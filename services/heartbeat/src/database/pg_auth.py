@@ -119,6 +119,85 @@ class PgAuthDatabase:
 
         return sorted(all_perms)
 
+    # -- Device Operations ---------------------------------------------
+
+    def register_device(
+        self,
+        device_id: str,
+        machine_guid: str,
+        os_type: str,
+        mac_address: str = None,
+        computer_name: str = None,
+        os_version: str = None,
+        app_type: str = None,
+        app_version: str = None,
+        user_id: str = None,
+    ) -> Dict[str, Any]:
+        """Register or update a device (upsert)."""
+        now = datetime.now(timezone.utc)
+        # Try update first
+        updated = self._pool.execute_update(
+            """UPDATE auth.devices
+               SET machine_guid = %s, mac_address = %s,
+                   computer_name = %s, os_type = %s, os_version = %s,
+                   last_app_type = %s, last_app_version = %s,
+                   last_seen_at = %s, user_id = COALESCE(%s, user_id)
+               WHERE device_id = %s""",
+            (machine_guid, mac_address, computer_name, os_type,
+             os_version, app_type, app_version, now, user_id, device_id),
+        )
+        if updated == 0:
+            self._pool.execute_insert(
+                """INSERT INTO auth.devices
+                   (device_id, user_id, machine_guid, mac_address,
+                    computer_name, os_type, os_version,
+                    last_app_type, last_app_version, last_seen_at,
+                    registered_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (device_id, user_id, machine_guid, mac_address,
+                 computer_name, os_type, os_version,
+                 app_type, app_version, now, now),
+            )
+        return self.get_device(device_id)
+
+    def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Look up device by device_id."""
+        results = self._pool.execute_query(
+            "SELECT * FROM auth.devices WHERE device_id = %s",
+            (device_id,),
+        )
+        return results[0] if results else None
+
+    def list_user_devices(self, user_id: str) -> List[Dict[str, Any]]:
+        """List all devices registered by a user."""
+        return self._pool.execute_query(
+            """SELECT * FROM auth.devices
+               WHERE user_id = %s
+               ORDER BY last_seen_at DESC NULLS LAST""",
+            (user_id,),
+        )
+
+    def revoke_device(
+        self, device_id: str, revoked_by: str
+    ) -> int:
+        """Revoke a device and all its active sessions."""
+        now = datetime.now(timezone.utc)
+        # Revoke device
+        self._pool.execute_update(
+            """UPDATE auth.devices
+               SET is_revoked = TRUE, revoked_at = %s, revoked_by = %s
+               WHERE device_id = %s AND is_revoked = FALSE""",
+            (now, revoked_by, device_id),
+        )
+        # Revoke all sessions on that device
+        return self._pool.execute_update(
+            """UPDATE auth.sessions
+               SET is_revoked = TRUE, revoked_at = %s,
+                   revoked_reason = 'device_revoked'
+               WHERE device_id = %s AND is_revoked = FALSE""",
+            (now, device_id),
+        )
+
     # -- Session Operations --------------------------------------------
 
     def create_session(
@@ -131,15 +210,18 @@ class PgAuthDatabase:
         last_auth_at: str,
         session_expires_at: str = "",
         last_auth_method: str = "password",
+        device_id: str = None,
     ) -> None:
         """Create a new session record."""
         self._pool.execute_insert(
             """INSERT INTO auth.sessions
                (session_id, user_id, jwt_jti, issued_at, expires_at,
-                last_auth_at, session_expires_at, last_auth_method)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                last_auth_at, session_expires_at, last_auth_method,
+                device_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (session_id, user_id, jwt_jti, issued_at, expires_at,
-             last_auth_at, session_expires_at, last_auth_method),
+             last_auth_at, session_expires_at, last_auth_method,
+             device_id),
         )
 
     def get_session_by_jti(self, jwt_jti: str) -> Optional[Dict[str, Any]]:
@@ -359,14 +441,111 @@ class PgAuthDatabase:
         """
         Get max concurrent sessions for a tenant.
 
-        Currently returns the default (1). In future, this will query
-        a tenant configuration table.
+        Reads from env var HEARTBEAT_MAX_CONCURRENT_SESSIONS (default 3).
         """
-        # TODO: Query tenant config table when built
         default = int(os.environ.get(
-            "HEARTBEAT_MAX_CONCURRENT_SESSIONS", "1"
+            "HEARTBEAT_MAX_CONCURRENT_SESSIONS", "3"
         ))
         return default
+
+    def get_device_active_session(
+        self, user_id: str, device_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get active session for a user on a specific device."""
+        results = self._pool.execute_query(
+            """SELECT * FROM auth.sessions
+               WHERE user_id = %s AND device_id = %s
+               AND is_revoked = FALSE
+               ORDER BY issued_at DESC LIMIT 1""",
+            (user_id, device_id),
+        )
+        return results[0] if results else None
+
+    def revoke_oldest_session(self, user_id: str) -> int:
+        """Revoke the oldest active session for a user (FIFO eviction)."""
+        now = datetime.now(timezone.utc)
+        # Find the oldest active session
+        results = self._pool.execute_query(
+            """SELECT session_id FROM auth.sessions
+               WHERE user_id = %s AND is_revoked = FALSE
+               ORDER BY issued_at ASC LIMIT 1""",
+            (user_id,),
+        )
+        if not results:
+            return 0
+        return self._pool.execute_update(
+            """UPDATE auth.sessions
+               SET is_revoked = TRUE, revoked_at = %s,
+                   revoked_reason = 'session_evicted'
+               WHERE session_id = %s AND is_revoked = FALSE""",
+            (now, results[0]["session_id"]),
+        )
+
+    # -- App Registration Operations -----------------------------------
+
+    def get_app_registration(
+        self, device_id: str, source_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """Look up existing app registration by device + source_type."""
+        results = self._pool.execute_query(
+            """SELECT * FROM auth.app_registrations
+               WHERE device_id = %s AND source_type = %s""",
+            (device_id, source_type),
+        )
+        return results[0] if results else None
+
+    def get_next_source_sequence(
+        self, source_type: str, device_id: str
+    ) -> int:
+        """Get next sequence number for source_id generation."""
+        results = self._pool.execute_query(
+            """SELECT COUNT(*) as count FROM auth.app_registrations
+               WHERE source_type = %s""",
+            (source_type,),
+        )
+        return (results[0]["count"] if results else 0) + 1
+
+    def create_app_registration(
+        self,
+        source_id: str,
+        source_type: str,
+        source_name: str,
+        device_id: str,
+        user_id: str,
+        tenant_id: str,
+        app_version: str = None,
+    ) -> Dict[str, Any]:
+        """Create a new app registration."""
+        now = datetime.now(timezone.utc)
+        self._pool.execute_insert(
+            """INSERT INTO auth.app_registrations
+               (source_id, source_type, source_name, device_id,
+                user_id, tenant_id, app_version,
+                registered_at, last_seen_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (source_id, source_type, source_name, device_id,
+             user_id, tenant_id, app_version, now, now),
+        )
+        return self.get_app_registration(device_id, source_type)
+
+    def update_app_registration_seen(
+        self, device_id: str, source_type: str, app_version: str = None
+    ) -> int:
+        """Update last_seen_at (and optionally app_version) for existing registration."""
+        now = datetime.now(timezone.utc)
+        if app_version:
+            return self._pool.execute_update(
+                """UPDATE auth.app_registrations
+                   SET last_seen_at = %s, app_version = %s
+                   WHERE device_id = %s AND source_type = %s""",
+                (now, app_version, device_id, source_type),
+            )
+        return self._pool.execute_update(
+            """UPDATE auth.app_registrations
+               SET last_seen_at = %s
+               WHERE device_id = %s AND source_type = %s""",
+            (now, device_id, source_type),
+        )
 
 
 # -- Singleton ---------------------------------------------------------

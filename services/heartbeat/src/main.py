@@ -525,7 +525,8 @@ app.include_router(metrics_router)
 # Blob Status (Float SDK + Core)
 app.include_router(blob_status_router)
 
-# Auth (Part 4 -- login, refresh, logout, introspect, stepup, policy)
+# Auth (Part 4 -- login, refresh, logout, introspect, stepup, policy,
+#        device registration, app registration, session management)
 import os
 if os.environ.get("HEARTBEAT_MOCK_AUTH", "").lower() in ("true", "1", "yes"):
     from .api.mock_auth import router as mock_auth_router
@@ -534,6 +535,16 @@ if os.environ.get("HEARTBEAT_MOCK_AUTH", "").lower() in ("true", "1", "yes"):
     logging.getLogger(__name__).warning("MOCK AUTH ENABLED — demo mode, not for production")
 else:
     app.include_router(auth_router)
+
+# Test Harness (conditional — HEARTBEAT_TEST_HARNESS_ENABLED=true)
+if os.environ.get("HEARTBEAT_TEST_HARNESS_ENABLED", "").lower() in ("true", "1", "yes"):
+    from .api.test_harness.endpoints import router as test_harness_router
+    app.include_router(test_harness_router)
+    logging.getLogger(__name__).warning("TEST HARNESS ENABLED — /api/test/* endpoints active")
+
+# Admin (update engine stubs)
+from .api.admin import router as admin_router
+app.include_router(admin_router)
 
 # SSE Stream (authenticated, multiplexed events)
 from .api.sse import router as sse_stream_router

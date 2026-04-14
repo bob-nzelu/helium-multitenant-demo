@@ -101,6 +101,7 @@ def _cipher_valid_until(window_seconds: int = 540) -> str:
 async def login(
     email: str,
     password: str,
+    device_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Authenticate user with local credentials.
@@ -111,15 +112,16 @@ async def login(
         1. Look up user by email
         2. Verify password with bcrypt
         3. Check user is active
-        4. Check concurrent session limit
-        5. Detect first-run state -> issue bootstrap token
-        6. Create session with 8-hour hard cap
-        7. Issue short-lived Ed25519 JWT (30 min)
-        8. Derive cipher_text from master_secret
+        4. Enforce 3-session limit (evict oldest if needed)
+        5. Replace existing session on same device
+        6. Detect first-run state -> issue bootstrap token
+        7. Create session with 8-hour hard cap
+        8. Issue short-lived Ed25519 JWT (30 min)
+        9. Derive cipher_text from master_secret
 
     Returns:
         {access_token, token_type, cipher_text, expires_at,
-         session_expires_at, user: {...}}
+         session_expires_at, user: {...}, device_id}
     """
     config = get_config()
     db = get_pg_auth_database()
@@ -149,23 +151,23 @@ async def login(
     if not password_valid:
         _auth_error("TOKEN_INVALID", "Invalid credentials", 401)
 
-    # 4. Check concurrent session limit
+    # 4. If device already has active session for this user, revoke it
+    if device_id:
+        existing = db.get_device_active_session(user["user_id"], device_id)
+        if existing:
+            db.revoke_session(existing["session_id"], reason="device_replaced")
+
+    # 5. Check concurrent session limit — evict oldest if at cap
     max_sessions = db.get_tenant_max_sessions(user["tenant_id"])
     active_count = db.count_active_sessions(user["user_id"])
-    if active_count >= max_sessions:
-        _auth_error(
-            "SESSION_LIMIT",
-            f"Concurrent session limit reached ({max_sessions}). "
-            "Revoke an existing session or contact your administrator.",
-            409,
-            max_sessions=max_sessions,
-            active_sessions=active_count,
-        )
+    while active_count >= max_sessions:
+        db.revoke_oldest_session(user["user_id"])
+        active_count = db.count_active_sessions(user["user_id"])
 
-    # 5. Check first-run state
+    # 6. Check first-run state
     is_first_run = bool(user["is_first_run"])
 
-    # 6. Build JWT payload
+    # 7. Build JWT payload
     now = datetime.now(timezone.utc)
     jwt_expires = now + timedelta(minutes=config.jwt_expiry_minutes)
     session_expires = now + timedelta(hours=config.session_hours)
@@ -190,6 +192,7 @@ async def login(
         "role": user["role_id"],
         "permissions": permissions,
         "permissions_version": permissions_version,
+        "device_id": device_id,
         "last_auth_at": now_iso,
         "issued_at": now_iso,
         "expires_at": jwt_expires_iso,
@@ -201,10 +204,10 @@ async def login(
     if is_first_run:
         payload["scope"] = "bootstrap"
 
-    # 7. Sign JWT
+    # 8. Sign JWT
     access_token = jwt_mgr.create_token(payload)
 
-    # 8. Create session in PostgreSQL
+    # 9. Create session in PostgreSQL
     db.create_session(
         session_id=session_id,
         user_id=user["user_id"],
@@ -213,12 +216,13 @@ async def login(
         expires_at=jwt_expires_iso,
         last_auth_at=now_iso,
         session_expires_at=session_expires_iso,
+        device_id=device_id,
     )
 
-    # 9. Stamp last login
+    # 10. Stamp last login
     db.update_last_login(user["user_id"])
 
-    # 10. Derive cipher_text from master_secret
+    # 11. Derive cipher_text from master_secret
     cipher_text = _derive_cipher_text(
         user["master_secret"],
         config.cipher_window_seconds,
@@ -227,7 +231,7 @@ async def login(
     logger.info(
         f"Login successful: user={user['user_id']} "
         f"role={user['role_id']} first_run={is_first_run} "
-        f"session_cap={session_expires_iso}"
+        f"device={device_id} session_cap={session_expires_iso}"
     )
 
     return {
@@ -243,6 +247,7 @@ async def login(
             "tenant_id": user["tenant_id"],
             "is_first_run": is_first_run,
         },
+        "device_id": device_id,
     }
 
 
@@ -340,12 +345,16 @@ async def refresh_token(
         user["user_id"], user["role_id"]
     )
 
+    # Preserve device_id from session or original claims
+    session_device_id = session.get("device_id") or claims.get("device_id")
+
     payload = {
         "sub": user["user_id"],
         "tenant_id": user["tenant_id"],
         "role": user["role_id"],
         "permissions": permissions,
         "permissions_version": db_perm_version,
+        "device_id": session_device_id,
         "last_auth_at": last_auth_at,
         "issued_at": now_iso,
         "expires_at": jwt_expires_iso,
@@ -507,6 +516,7 @@ async def introspect_token(
         "role": user["role_id"],
         "permissions": permissions,
         "tenant_id": user["tenant_id"],
+        "device_id": claims.get("device_id"),
         "last_auth_at": last_auth_at,
         "expires_at": claims.get("expires_at", ""),
         "session_expires_at": claims.get("session_expires_at", ""),
@@ -644,12 +654,16 @@ async def step_up_auth(
     )
     db_perm_version = user.get("permissions_version", 1)
 
+    # Preserve device_id from session or original claims
+    stepup_device_id = session.get("device_id") or claims.get("device_id")
+
     payload = {
         "sub": user["user_id"],
         "tenant_id": user["tenant_id"],
         "role": user["role_id"],
         "permissions": permissions,
         "permissions_version": db_perm_version,
+        "device_id": stepup_device_id,
         "last_auth_at": now_iso,
         "issued_at": now_iso,
         "expires_at": jwt_expires_iso,
