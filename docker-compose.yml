@@ -42,7 +42,7 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-helium}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-helium_mq_2026}
-      RABBITMQ_DEFAULT_VHOST: helium
+      RABBITMQ_DEFAULT_VHOST: /
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
       - ./config/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
@@ -109,7 +109,7 @@ services:
       - RELAY_MAX_FILE_SIZE_MB=10.0
       - RELAY_WORKERS=1
       - RELAY_MALWARE_SCAN_ENABLED=false
-      - RELAY_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/helium
+      - RELAY_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/
       - RELAY_CORE_QUEUE=core_queue
     volumes:
       - ./config/tenants.json:/app/tenants.json:ro
@@ -149,7 +149,7 @@ services:
       - CORE_HIS_FEEDBACK_ENABLED=false
       - CORE_LOG_LEVEL=INFO
       - CORE_CORS_ORIGINS=*
-      - CORE_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/helium
+      - CORE_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/
       - CORE_CORE_QUEUE=core_queue
       - CORE_EDGE_QUEUE=edge_queue
     depends_on:
@@ -173,7 +173,7 @@ services:
     ports:
       - "8085:8085"
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8085/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -186,7 +186,7 @@ services:
     ports:
       - "8500:8500"
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8500/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -199,7 +199,7 @@ services:
     ports:
       - "8501:8501"
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8501/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

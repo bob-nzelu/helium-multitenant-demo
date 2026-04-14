@@ -1,35 +1,15 @@
 {
-  "vhosts": [
-    {"name": "helium"}
-  ],
-  "users": [
-    {
-      "name": "helium",
-      "password_hash": "helium_mq_2026",
-      "hashing_algorithm": "rabbit_password_hashing_sha256",
-      "tags": "administrator"
-    }
-  ],
-  "permissions": [
-    {
-      "user": "helium",
-      "vhost": "helium",
-      "configure": ".*",
-      "write": ".*",
-      "read": ".*"
-    }
-  ],
   "exchanges": [
     {
       "name": "helium.direct",
-      "vhost": "helium",
+      "vhost": "/",
       "type": "direct",
       "durable": true,
       "auto_delete": false
     },
     {
       "name": "helium.dlx",
-      "vhost": "helium",
+      "vhost": "/",
       "type": "direct",
       "durable": true,
       "auto_delete": false
@@ -38,7 +18,7 @@
   "queues": [
     {
       "name": "core_queue",
-      "vhost": "helium",
+      "vhost": "/",
       "durable": true,
       "auto_delete": false,
       "arguments": {
@@ -49,7 +29,7 @@
     },
     {
       "name": "core_queue.dlq",
-      "vhost": "helium",
+      "vhost": "/",
       "durable": true,
       "auto_delete": false,
       "arguments": {
@@ -58,7 +38,7 @@
     },
     {
       "name": "edge_queue",
-      "vhost": "helium",
+      "vhost": "/",
       "durable": true,
       "auto_delete": false,
       "arguments": {
@@ -69,7 +49,7 @@
     },
     {
       "name": "edge_queue.dlq",
-      "vhost": "helium",
+      "vhost": "/",
       "durable": true,
       "auto_delete": false,
       "arguments": {
@@ -80,28 +60,28 @@
   "bindings": [
     {
       "source": "helium.direct",
-      "vhost": "helium",
+      "vhost": "/",
       "destination": "core_queue",
       "destination_type": "queue",
       "routing_key": "core_queue"
     },
     {
       "source": "helium.direct",
-      "vhost": "helium",
+      "vhost": "/",
       "destination": "edge_queue",
       "destination_type": "queue",
       "routing_key": "edge_queue"
     },
     {
       "source": "helium.dlx",
-      "vhost": "helium",
+      "vhost": "/",
       "destination": "core_queue.dlq",
       "destination_type": "queue",
       "routing_key": "core_queue.dlq"
     },
     {
       "source": "helium.dlx",
-      "vhost": "helium",
+      "vhost": "/",
       "destination": "edge_queue.dlq",
       "destination_type": "queue",
       "routing_key": "edge_queue.dlq"
