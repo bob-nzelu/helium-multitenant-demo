@@ -2,9 +2,21 @@
 
 Tracked items from the 17 Apr 2026 old-vs-new audit session. Each item has a clear "when to resolve" trigger so nothing drifts indefinitely.
 
+**Tracking:** Each item is also a GitHub Issue. Run `gh issue list --label debt` at the start of every session to confirm we're honoring the list.
+
+| # | Issue | Title | Priority | Milestone |
+|---|---|---|---|---|
+| 1 | [#1](https://github.com/bob-nzelu/helium-multitenant-demo/issues/1) | Rename `source_type` → `app_type` | P2 | before-production |
+| 2 | [#2](https://github.com/bob-nzelu/helium-multitenant-demo/issues/2) | Migrate SQLite DBs → PostgreSQL | P2 | before-production |
+| 3 | [#3](https://github.com/bob-nzelu/helium-multitenant-demo/issues/3) | Wire audit logging into auth events | P1 | before-2nd-tenant |
+| 4 | [#4](https://github.com/bob-nzelu/helium-multitenant-demo/issues/4) | 7-year audit retention | P2 | before-production |
+| 5 | [#5](https://github.com/bob-nzelu/helium-multitenant-demo/issues/5) | Float/Reader device_id + register-app | P1 | before-2nd-tenant |
+| 6 | [#6](https://github.com/bob-nzelu/helium-multitenant-demo/issues/6) | Tests for 14-17 Apr HeartBeat additions | P2 | before-production |
+| 7 | [#7](https://github.com/bob-nzelu/helium-multitenant-demo/issues/7) | Real update engine implementation | P3 | — |
+
 ---
 
-## 1. Rename `source_type` → `app_type` in HeartBeat
+## 1. Rename `source_type` → `app_type` in HeartBeat — [#1](https://github.com/bob-nzelu/helium-multitenant-demo/issues/1)
 
 **Why:** Collision with Core's `invoices.source` field. Two different concepts share overlapping names:
 
@@ -24,7 +36,7 @@ Developers will confuse them. Rename HeartBeat's field to `app_type` (it IS an a
 
 ---
 
-## 2. Harmonize on PostgreSQL — migrate blob.db, config.db, license.db, audit.db
+## 2. Harmonize on PostgreSQL — migrate blob.db, config.db, license.db, audit.db — [#2](https://github.com/bob-nzelu/helium-multitenant-demo/issues/2)
 
 **Why:** We run Postgres for auth. Maintaining parallel SQLite files for blob/config/license fragments the data model:
 
@@ -47,7 +59,7 @@ Developers will confuse them. Rename HeartBeat's field to `app_type` (it IS an a
 
 ---
 
-## 3. Add audit logging to auth events
+## 3. Add audit logging to auth events — [#3](https://github.com/bob-nzelu/helium-multitenant-demo/issues/3)
 
 **Why:** `audit_handler.py` + `audit_guard.py` exist in both old and new HeartBeat, but neither wires them to auth events. Login, logout, password change, session eviction, device revocation — all silent. Compliance risk.
 
@@ -69,7 +81,7 @@ Developers will confuse them. Rename HeartBeat's field to `app_type` (it IS an a
 
 ---
 
-## 4. 7-year retention policy for audit data
+## 4. 7-year retention policy for audit data — [#4](https://github.com/bob-nzelu/helium-multitenant-demo/issues/4)
 
 **Why:** FIRS compliance requires 7-year audit retention. Today enforced only by convention ("don't run DELETE"). No programmatic guard, no cold-storage archival.
 
@@ -79,7 +91,7 @@ Developers will confuse them. Rename HeartBeat's field to `app_type` (it IS an a
 
 ---
 
-## 5. Float + Reader: compute device_id and call register-app
+## 5. Float + Reader: compute device_id and call register-app — [#5](https://github.com/bob-nzelu/helium-multitenant-demo/issues/5)
 
 **Why:** HeartBeat now accepts device_id in login and offers `register-device` / `register-app` endpoints. Neither Float nor Reader uses them yet.
 
@@ -99,7 +111,7 @@ Developers will confuse them. Rename HeartBeat's field to `app_type` (it IS an a
 
 ---
 
-## 6. Test coverage for this session's additions
+## 6. Test coverage for this session's additions — [#6](https://github.com/bob-nzelu/helium-multitenant-demo/issues/6)
 
 **Why:** ~1,041 LOC added in the 14 Apr HeartBeat session (mock_auth, admin stubs, test harness, registration_handler, auth.py + pg_auth.py extensions) with zero test files. Old HeartBeat had 42 test files / 11,025 LOC; new has identical 42 / 11,025.
 
@@ -109,7 +121,7 @@ Developers will confuse them. Rename HeartBeat's field to `app_type` (it IS an a
 
 ---
 
-## 7. Real update engine implementation
+## 7. Real update engine implementation — [#7](https://github.com/bob-nzelu/helium-multitenant-demo/issues/7)
 
 **Why:** `POST /api/admin/updates/apply|rollback|status` return 501. History returns empty list. Full spec exists in `HEARTBEAT_UPDATE_SPEC.md`. Not a regression — same stub state as OLD.
 
