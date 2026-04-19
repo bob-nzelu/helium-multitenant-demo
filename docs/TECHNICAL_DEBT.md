@@ -4,6 +4,28 @@ Tracked items from the 17 Apr 2026 old-vs-new audit session. Each item has a cle
 
 **Tracking:** Each item is also a GitHub Issue. Run `gh issue list --label debt` at the start of every session to confirm we're honoring the list.
 
+> **Note (19 Apr 2026):** Canonical HeartBeat code is moving to `github.com/bob-nzelu/helium-services`. Issues #1–#7 will migrate there after the repo is established (Phase 2). Until then, they remain on this repo.
+
+---
+
+## 0. Meta-Decision — Canonical Repository (Resolved 19 Apr 2026)
+
+**Decision:** Option C — `Helium\Services\HeartBeat` is canonical. `helium-multitenant-demo` becomes deploy-only.
+
+**Implementation:**
+- New git repo: `bob-nzelu/helium-services` (init at `Helium\Services\`, HeartBeat committed first)
+- Phase 1: port 14–17 Apr delta (1,541 LOC) from demo → Services
+- Phase 2: rewire EC2 to build from helium-services
+- Demo repo: docker-compose, Dockerfile context, config/schemas, tenants.json only — no code, no docs
+
+**Why Option C over Option B:** Bob's instinct is that Services is the canonical home for all backend service code, with a clear separation from deployment artefacts. Option B (keeping demo as canonical) would leave code mixed with deploy config indefinitely.
+
+**Key finding:** `Helium\Services\HeartBeat` had no `.git` folder — the "OLD has git history" premise in the harmonization handoff was incorrect. helium-services will start with a fresh git history from the 14 Apr baseline.
+
+**Ref:** `docs/HEARTBEAT_PHASE1_MERGE_PLAN.md`
+
+---
+
 | # | Issue | Title | Priority | Milestone |
 |---|---|---|---|---|
 | 1 | [#1](https://github.com/bob-nzelu/helium-multitenant-demo/issues/1) | Rename `source_type` → `app_type` | P2 | before-production |
