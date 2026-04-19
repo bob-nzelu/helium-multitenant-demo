@@ -58,7 +58,7 @@ services:
   # ── HeartBeat ──────────────────────────────────────────────────────
   heartbeat:
     build:
-      context: ./services/heartbeat
+      context: ${HEARTBEAT_BUILD_CONTEXT:-./services/heartbeat}
     ports:
       - "9000:9000"
     environment:
