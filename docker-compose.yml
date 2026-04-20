@@ -104,6 +104,8 @@ services:
       - RELAY_INSTANCE_ID=relay-helium-1
       - RELAY_REQUIRE_ENCRYPTION=false
       - RELAY_HEARTBEAT_API_URL=http://heartbeat:9000
+      - RELAY_HEARTBEAT_API_KEY=${RELAY_HEARTBEAT_API_KEY:-rl_test_relay001}
+      - RELAY_HEARTBEAT_API_SECRET=${RELAY_HEARTBEAT_API_SECRET:-secret-for-test-key-001}
       - RELAY_CORE_API_URL=http://core:8080
       - RELAY_TENANTS_FILE=/app/tenants.json
       - RELAY_DATABASE_URL=postgresql://${PG_USER:-helium}:${PG_PASSWORD:-helium_demo_2026}@postgres:5432/${PG_DATABASE:-helium}

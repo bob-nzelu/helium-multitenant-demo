@@ -25,6 +25,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
+from ..caller_context import CallerContext
 from ..deps import authenticate_request, decrypt_body_if_needed
 from ..models import IngestResponse
 from ...services.bulk import BulkService
@@ -54,7 +55,7 @@ async def ingest(
     call_type: str = Form(default="bulk", description="Flow type: 'bulk' (Float UI) or 'external' (API callers)"),
     metadata: Optional[str] = Form(default=None, description="JSON string with SDK identity/trace fields"),
     invoice_data_json: Optional[str] = Form(default=None, description="JSON string with invoice metadata (external flow only)"),
-    api_key: str = Depends(authenticate_request),
+    ctx: CallerContext = Depends(authenticate_request),
 ):
     """
     Ingest files for invoice processing.
@@ -78,7 +79,7 @@ async def ingest(
         Bearer JWT forwarded to HeartBeat/Core for user identity verification.
         Relay authenticates via HMAC (X-API-Key/X-Signature), not JWT.
     """
-    trace_id = getattr(request.state, "trace_id", "")
+    trace_id = ctx.trace_id or getattr(request.state, "trace_id", "")
 
     # Parse SDK metadata (identity + trace fields)
     meta: dict = {}
@@ -88,11 +89,19 @@ async def ingest(
         except (json.JSONDecodeError, TypeError):
             logger.warning(f"[{trace_id}] Invalid metadata JSON — ignoring")
 
-    # Extract JWT from Authorization header (Relay forwards, does NOT validate)
+    # For the user JWT path (§3.1), forward the JWT downstream so HB can
+    # attribute blob/audit entries to the user, not to Relay. For HMAC and
+    # service-creds paths, jwt_token stays None — downstream gets Relay's
+    # own service credentials.
     jwt_token: Optional[str] = None
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.lower().startswith("bearer "):
-        jwt_token = auth_header[7:].strip()
+    if ctx.is_user:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            jwt_token = auth_header[7:].strip()
+
+    # caller_source identifies the write-origin in HB's file_entries.source.
+    # For ERP: the HMAC api_key. For user: the user_id. For service: the api_key.
+    caller_source = ctx.raw_api_key or ctx.identifier or "unknown"
 
     # Map call_type to canonical queue_mode for HeartBeat blob schema
     # bulk → "bulk", external → "api"
@@ -105,14 +114,16 @@ async def ingest(
         logger.info(
             f"[{trace_id}] POST /api/ingest — "
             f"call_type={call_type}, files={len(files)}, "
+            f"actor={ctx.actor_type}, tenant={ctx.tenant_id}, "
             f"user_trace_id={meta.get('user_trace_id', 'none')}, "
-            f"helium_user_id={meta.get('helium_user_id', 'none')}, "
+            f"helium_user_id={meta.get('helium_user_id', ctx.identifier if ctx.is_user else 'none')}, "
             f"jwt={'yes' if jwt_token else 'no'}"
         )
     else:
         logger.info(
             f"[{trace_id}] POST /api/ingest — "
-            f"call_type={call_type}, files={len(files)}"
+            f"call_type={call_type}, files={len(files)}, "
+            f"actor={ctx.actor_type}, tenant={ctx.tenant_id}"
         )
 
     # Read uploaded files into (filename, bytes) tuples
@@ -133,7 +144,7 @@ async def ingest(
 
         result = await external_svc.process(
             files=file_tuples,
-            api_key=api_key,
+            api_key=caller_source,
             trace_id=trace_id,
             invoice_data=inv_data,
             metadata=meta,
@@ -158,7 +169,7 @@ async def ingest(
         bulk_svc: BulkService = request.app.state.bulk_service
         result = await bulk_svc.process(
             files=file_tuples,
-            api_key=api_key,
+            api_key=caller_source,
             trace_id=trace_id,
             metadata=meta,
             jwt_token=jwt_token,

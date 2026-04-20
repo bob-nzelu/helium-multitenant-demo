@@ -20,6 +20,7 @@ from ..config_cache import ConfigCache
 from ..core.tenant import load_tenants
 from ..clients.core import CoreClient
 from ..clients.heartbeat import HeartBeatClient
+from ..clients.introspect import IntrospectClient
 from ..clients.redis_client import RedisClient
 from ..core.irn import IRNGenerator
 from ..core.module_cache import TransformaModuleCache
@@ -91,6 +92,12 @@ def create_app(
             service_api_key=config.heartbeat_api_key,
             service_api_secret=config.heartbeat_api_secret,
         )
+        introspect_client = IntrospectClient(
+            heartbeat_url=config.heartbeat_api_url,
+            service_api_key=config.heartbeat_api_key,
+            service_api_secret=config.heartbeat_api_secret,
+            timeout_s=config.request_timeout_s,
+        )
         core = CoreClient(
             core_api_url=config.core_api_url,
             timeout=config.request_timeout_s,
@@ -140,6 +147,7 @@ def create_app(
         app.state.api_key_secrets = api_key_secrets
         app.state.tenant_registry = tenant_registry if config.tenants_file else {}
         app.state.heartbeat = heartbeat
+        app.state.introspect_client = introspect_client
         app.state.core = core
         app.state.redis = redis_client
         app.state.config_cache = config_cache
@@ -156,6 +164,7 @@ def create_app(
         # ── Shutdown ─────────────────────────────────────────────────
         logger.info("Relay-API shutting down")
         await heartbeat.close()
+        await introspect_client.close()
         await redis_client.close()
         await module_cache.cleanup()
 
