@@ -63,6 +63,7 @@ def _make_request(
         headers=_H(hdrs),
         state=state,
         app=app,
+        url=SimpleNamespace(path="/api/ingest"),
     )
 
     async def _body():

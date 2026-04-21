@@ -103,6 +103,8 @@ def create_app(
             service_api_key=config.heartbeat_api_key,
             service_api_secret=config.heartbeat_api_secret,
             timeout_s=config.request_timeout_s,
+            cache_ttl_s=config.introspect_cache_ttl_s,
+            cache_max_entries=config.introspect_cache_max,
         )
         core = CoreClient(
             core_api_url=config.core_api_url,

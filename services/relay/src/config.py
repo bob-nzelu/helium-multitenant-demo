@@ -83,6 +83,10 @@ class RelayConfig:
     rate_limit_fail_open_burst: int = 10         # req/sec/caller when Redis down (§6.6)
     nonce_ttl_s: int = 600                       # HMAC nonce replay window (§7)
 
+    # ── Introspect cache (Keel JWT spec §5) ─────────────────────────────
+    introspect_cache_ttl_s: float = 30.0         # HELIUM_AUTH_SPEC §8.7
+    introspect_cache_max: int = 10_000           # bounds memory in attack scenarios
+
     # ── Workers ──────────────────────────────────────────────────────────
     workers: int = 1                    # uvicorn --workers (production)
 
@@ -209,6 +213,12 @@ class RelayConfig:
             kwargs["rate_limit_fail_open_burst"] = int(v)
         if v := env("NONCE_TTL_S"):
             kwargs["nonce_ttl_s"] = int(v)
+
+        # ── Introspect cache
+        if v := env("INTROSPECT_CACHE_TTL_S"):
+            kwargs["introspect_cache_ttl_s"] = float(v)
+        if v := env("INTROSPECT_CACHE_MAX"):
+            kwargs["introspect_cache_max"] = int(v)
 
         # ── Workers
         if v := env("WORKERS"):

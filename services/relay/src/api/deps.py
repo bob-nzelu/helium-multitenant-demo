@@ -60,6 +60,25 @@ def get_external_service(request: Request) -> Any:
 
 # ── Auth dispatcher ──────────────────────────────────────────────────────
 
+# Per Keel HANDOFF_RELAY_JWT_INTROSPECT.md §2 and the HB-team response doc
+# (RELAY_JWT_INTROSPECT_HB_RESPONSE.md §2.1), the introspect call must pass
+# required_permission so HB enforces the permission check uniformly. The
+# mapping below defines per-route permission names; routes not listed get
+# no permission check (back-compat with pre-Phase-1b HMAC paths that never
+# enforced permissions).
+_ROUTE_REQUIRED_PERMISSIONS = (
+    ("/api/ingest",        "blob.upload"),
+    ("/api/bulk/preview",  "blob.upload"),
+)
+
+
+def _required_permission_for_path(path: str) -> Optional[str]:
+    for prefix, perm in _ROUTE_REQUIRED_PERMISSIONS:
+        if path.startswith(prefix):
+            return perm
+    return None
+
+
 def _tenant_id_for_api_key(request: Request, api_key: str) -> str:
     """
     Resolve tenant_id from an api_key via the tenants.json registry.
@@ -206,6 +225,10 @@ async def _verify_user_jwt(
 
     Never validates locally (§5.1). If HeartBeat is unreachable, raises
     AuthUpstreamUnavailableError → 502 (fail closed per §2.4).
+
+    Passes ``required_permission`` based on request path (per Keel spec §4.1
+    step 5). /api/ingest requires ``blob.upload``; other routes either set
+    their own required permission via app state or omit (back-compat).
     """
     introspect_client = getattr(request.app.state, "introspect_client", None)
     if introspect_client is None:
@@ -214,10 +237,12 @@ async def _verify_user_jwt(
         )
 
     trace_id = getattr(request.state, "trace_id", "") or ""
+    required_permission = _required_permission_for_path(request.url.path)
     try:
         result = await introspect_client.introspect(
             jwt_token=jwt_token,
             trace_id=trace_id,
+            required_permission=required_permission,
         )
     except HeartBeatUnavailableError as e:
         raise AuthUpstreamUnavailableError(str(e)) from e

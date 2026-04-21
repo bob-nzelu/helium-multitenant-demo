@@ -19,9 +19,11 @@ Headers:
     Authorization — Bearer JWT (optional, forwarded to HeartBeat/Core)
 """
 
+import asyncio
+import hashlib
 import json
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
@@ -34,6 +36,64 @@ from ...services.external import ExternalService
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _audit_file_hash(files: List[Tuple[str, bytes]]) -> str:
+    """sha256 over the concatenated file bytes — matches audit spec §6.2."""
+    h = hashlib.sha256()
+    for _, data in files:
+        h.update(data)
+    return h.hexdigest()
+
+
+async def _emit_ingest_audit(
+    request: Request,
+    ctx: CallerContext,
+    trace_id: str,
+    call_type: str,
+    queue_id: str,
+    data_uuid: str,
+    filenames: List[str],
+    file_count: int,
+    total_size_bytes: int,
+    file_hash: str,
+    meta: Dict[str, Any],
+) -> None:
+    """
+    Emit file.ingested audit event (Keel spec §6). Fire-and-forget — never
+    blocks the ingest response. HeartBeatClient.audit_log already logs
+    WARN-level on failure.
+    """
+    try:
+        heartbeat = request.app.state.heartbeat
+        source_id = request.headers.get("x-source-id", "")
+        user_trace_id = request.headers.get("x-user-trace-id", meta.get("user_trace_id", ""))
+
+        await heartbeat.audit_log(
+            service="relay",
+            event_type="file.ingested",
+            user_id=(ctx.identifier if ctx.is_user else None),
+            details={
+                "queue_id": queue_id,
+                "data_uuid": data_uuid,
+                "file_hash": file_hash,
+                "file_count": file_count,
+                "caller_type": call_type,
+                "actor_type": ctx.actor_type,
+                "tenant_id": ctx.tenant_id,
+                "source_id": source_id or None,
+                "user_trace_id": user_trace_id or None,
+                "filenames": filenames,
+                "total_size_bytes": total_size_bytes,
+            },
+        )
+    except Exception as e:
+        # audit_log swallows most errors already — this catches anything
+        # unexpected (e.g. app.state.heartbeat missing in tests) so it
+        # cannot break the upload.
+        logger.warning(
+            f"[{trace_id}] emit_ingest_audit suppressed exception: {e}"
+        )
 
 
 @router.post(
@@ -132,6 +192,11 @@ async def ingest(
         data = await f.read()
         file_tuples.append((f.filename or "unknown", data))
 
+    # Compute these once — shared across both flows' audit emission
+    filenames_list = [f for f, _ in file_tuples]
+    total_size_bytes = sum(len(d) for _, d in file_tuples)
+    concat_hash = _audit_file_hash(file_tuples)
+
     if call_type == "external":
         # External flow: ingest → IRN/QR
         external_svc: ExternalService = request.app.state.external_service
@@ -150,6 +215,13 @@ async def ingest(
             metadata=meta,
             jwt_token=jwt_token,
         )
+        # Audit: fire-and-forget, does not block response
+        asyncio.create_task(_emit_ingest_audit(
+            request, ctx, trace_id, "external",
+            result.ingest.queue_id, result.ingest.data_uuid,
+            filenames_list, result.ingest.file_count,
+            total_size_bytes, concat_hash, meta,
+        ))
         return IngestResponse(
             status=result.status,
             data_uuid=result.ingest.data_uuid,
@@ -174,6 +246,12 @@ async def ingest(
             metadata=meta,
             jwt_token=jwt_token,
         )
+        asyncio.create_task(_emit_ingest_audit(
+            request, ctx, trace_id, "bulk",
+            result.ingest.queue_id, result.ingest.data_uuid,
+            filenames_list, result.ingest.file_count,
+            total_size_bytes, concat_hash, meta,
+        ))
         return IngestResponse(
             status=result.status,
             data_uuid=result.ingest.data_uuid,
