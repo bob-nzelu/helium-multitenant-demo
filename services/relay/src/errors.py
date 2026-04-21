@@ -188,11 +188,44 @@ class TimestampExpiredError(AuthenticationFailedError):
         )
 
 
-class JWTRejectedError(AuthenticationFailedError):
-    """HeartBeat rejected the forwarded JWT (returned 401 on blob write)."""
+class JWTRejectedError(RelayError):
+    """
+    HeartBeat rejected a user JWT.
 
-    def __init__(self, message: str = "JWT rejected by HeartBeat"):
-        super().__init__(message=message)
+    Per BACKEND_SERVICE_AUTH_AND_ABUSE_SPEC.md §3.1, introspect returns
+    an error_code that maps to a specific HTTP status (401 for token
+    invalid/expired, 403 for permission/stepup, 423 for account locked).
+    Callers pass those through here rather than collapsing to 401.
+    """
+
+    def __init__(
+        self,
+        message: str = "JWT rejected by HeartBeat",
+        error_code: str = "TOKEN_INVALID",
+        status_code: int = 401,
+    ):
+        super().__init__(
+            error_code=error_code,
+            message=message,
+            status_code=status_code,
+        )
+
+
+class AuthUpstreamUnavailableError(RelayError):
+    """
+    HeartBeat introspect is unreachable or returned 5xx.
+
+    Per BACKEND_SERVICE_AUTH_AND_ABUSE_SPEC.md §2.4, auth failures against
+    an unreachable upstream must fail closed — return 502 to the caller,
+    never permit the request on cached claims.
+    """
+
+    def __init__(self, message: str = "Auth upstream unavailable"):
+        super().__init__(
+            error_code="AUTH_UPSTREAM_UNAVAILABLE",
+            message=message,
+            status_code=502,
+        )
 
 
 # ── Rate Limit (429) ──────────────────────────────────────────────────────
