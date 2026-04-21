@@ -77,6 +77,12 @@ class RelayConfig:
     redis_prefix: str = "relay"
     rate_limit_daily: int = 500         # Default daily uploads per company
 
+    # ── Phase 1b abuse middleware (spec §6–§8) ──────────────────────────
+    max_request_bytes: int = 52_428_800          # 50 MB flat cap (tier-aware deferred)
+    handler_timeout_s: int = 30                  # asyncio.wait_for handler wrap
+    rate_limit_fail_open_burst: int = 10         # req/sec/caller when Redis down (§6.6)
+    nonce_ttl_s: int = 600                       # HMAC nonce replay window (§7)
+
     # ── Workers ──────────────────────────────────────────────────────────
     workers: int = 1                    # uvicorn --workers (production)
 
@@ -193,6 +199,16 @@ class RelayConfig:
             kwargs["redis_prefix"] = v
         if v := env("RATE_LIMIT_DAILY"):
             kwargs["rate_limit_daily"] = int(v)
+
+        # ── Phase 1b abuse middleware
+        if v := env("MAX_REQUEST_BYTES"):
+            kwargs["max_request_bytes"] = int(v)
+        if v := env("HANDLER_TIMEOUT_S"):
+            kwargs["handler_timeout_s"] = int(v)
+        if v := env("RATE_LIMIT_FAIL_OPEN_BURST"):
+            kwargs["rate_limit_fail_open_burst"] = int(v)
+        if v := env("NONCE_TTL_S"):
+            kwargs["nonce_ttl_s"] = int(v)
 
         # ── Workers
         if v := env("WORKERS"):

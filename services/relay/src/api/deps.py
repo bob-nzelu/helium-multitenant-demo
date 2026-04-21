@@ -29,6 +29,7 @@ from ..errors import (
     HeartBeatUnavailableError,
     InvalidAPIKeyError,
     JWTRejectedError,
+    ReplayDetectedError,
 )
 from .caller_context import CallerContext
 
@@ -87,6 +88,11 @@ async def _verify_hmac(
 
     Preserves the existing behaviour: timestamp window, api_key lookup,
     signature verification over the raw body cached by BodyCacheMiddleware.
+
+    Spec §7 — nonce replay protection: if the caller supplies X-Nonce,
+    it MUST be single-use within the configured TTL (default 600s).
+    Missing X-Nonce is accepted with a WARN log for backward compat with
+    pre-Phase-1b clients; enforcement becomes mandatory in Phase 2.
     """
     body = getattr(request.state, "raw_body", None)
     if body is None:
@@ -103,6 +109,29 @@ async def _verify_hmac(
         api_key_secrets=api_key_secrets,
         trace_id=trace_id,
     )
+
+    # Nonce replay check — only when client opts in by sending X-Nonce.
+    nonce = request.headers.get("x-nonce")
+    if nonce:
+        redis = getattr(request.app.state, "redis", None)
+        cfg: RelayConfig = request.app.state.config
+        ttl_s = getattr(cfg, "nonce_ttl_s", 600)
+        if redis is not None:
+            claimed = await redis.nonce_claim(nonce, ttl_s=ttl_s)
+            if not claimed:
+                logger.warning(
+                    f"Nonce replay rejected api_key={x_api_key[:8]}... "
+                    f"nonce={nonce[:12]}...",
+                    extra={"trace_id": trace_id},
+                )
+                raise ReplayDetectedError(nonce=nonce)
+    else:
+        logger.info(
+            f"HMAC request without X-Nonce api_key={x_api_key[:8]}... — "
+            "accepted for backward compat; clients should migrate to "
+            "sending a unique X-Nonce per request (spec §7).",
+            extra={"trace_id": trace_id},
+        )
 
     tenant_id = _tenant_id_for_api_key(request, x_api_key)
     return CallerContext(

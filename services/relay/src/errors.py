@@ -247,6 +247,61 @@ class RateLimitExceededError(RelayError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class ReplayDetectedError(AuthenticationFailedError):
+    """
+    HMAC request nonce seen before within its TTL window (spec §7).
+
+    Inherits 401 from AuthenticationFailedError but exposes a distinct
+    error_code so clients can differentiate replay from signature-fail.
+    """
+
+    def __init__(self, nonce: str = ""):
+        # Deliberately call RelayError directly (not super().__init__) so we
+        # control the error_code — AuthenticationFailedError hard-codes it.
+        RelayError.__init__(
+            self,
+            error_code="REPLAY_DETECTED",
+            message=(
+                "Request nonce has already been used. "
+                "Nonces must be unique within the 600s replay window."
+            ),
+            status_code=401,
+        )
+        self.nonce = nonce
+
+
+# ── Request Safety (413, 504) ─────────────────────────────────────────────
+
+
+class RequestTooLargeError(RelayError):
+    """Request body exceeds configured size cap (spec §8.1)."""
+
+    def __init__(self, size_bytes: int, limit_bytes: int):
+        super().__init__(
+            error_code="REQUEST_TOO_LARGE",
+            message=(
+                f"Request body {size_bytes} bytes exceeds {limit_bytes}-byte limit."
+            ),
+            details=[{
+                "size_bytes": str(size_bytes),
+                "limit_bytes": str(limit_bytes),
+            }],
+            status_code=413,
+        )
+
+
+class RequestTimeoutError(RelayError):
+    """Request handler exceeded the configured timeout (spec §8.2)."""
+
+    def __init__(self, timeout_s: int):
+        super().__init__(
+            error_code="REQUEST_TIMEOUT",
+            message=f"Request exceeded {timeout_s}s handler timeout.",
+            details=[{"timeout_s": str(timeout_s)}],
+            status_code=504,
+        )
+
+
 # ── Not Found (404) ───────────────────────────────────────────────────────
 
 

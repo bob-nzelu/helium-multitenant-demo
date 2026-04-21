@@ -29,7 +29,13 @@ from ..errors import RelayError
 from ..services.bulk import BulkService
 from ..services.external import ExternalService
 from ..services.ingestion import IngestionService
-from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
+from .middleware import (
+    BodyCacheMiddleware,
+    RateLimitMiddleware,
+    RequestSafetyMiddleware,
+    TraceIDMiddleware,
+    relay_error_handler,
+)
 from .routes.health import router as health_router
 from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
@@ -104,13 +110,25 @@ def create_app(
             preview_timeout=config.preview_timeout_s,
         )
 
-        # Redis (rate limiting)
+        # Redis (rate limiting + nonce replay)
         redis_client = RedisClient(
             redis_url=config.redis_url,
             prefix=config.redis_prefix,
             default_limit=config.rate_limit_daily,
+            fail_open_burst=config.rate_limit_fail_open_burst,
         )
         await redis_client.connect()
+
+        # Tier-limits catalogue for Phase 1b rate limiter (spec §6.3).
+        # TODO: fetch from HB /api/admin/tier_limits once that endpoint ships.
+        # For now, use the spec-default table baked in — matches migration 007
+        # seed values in config.db.tier_limits.
+        rate_limits_by_tier = {
+            "test":       {"api_requests_per_minute": 30,   "api_requests_per_hour": 500},
+            "standard":   {"api_requests_per_minute": 100,  "api_requests_per_hour": 2000},
+            "pro":        {"api_requests_per_minute": 300,  "api_requests_per_hour": 10000},
+            "enterprise": {"api_requests_per_minute": 1000, "api_requests_per_hour": 50000},
+        }
 
         # Tenant config cache (full config from HeartBeat)
         config_cache = ConfigCache(heartbeat)
@@ -150,6 +168,7 @@ def create_app(
         app.state.introspect_client = introspect_client
         app.state.core = core
         app.state.redis = redis_client
+        app.state.rate_limits_by_tier = rate_limits_by_tier
         app.state.config_cache = config_cache
         app.state.module_cache = module_cache
         app.state.ingestion = ingestion
@@ -176,11 +195,21 @@ def create_app(
     )
 
     # Middleware (Starlette stacks: last added = outermost = runs first)
-    # 1. TraceIDMiddleware: inject X-Trace-ID (inner)
-    # 2. BodyCacheMiddleware: cache raw body so HMAC auth + form parsing
-    #    can both read it without "Stream consumed" errors (outer)
+    # Innermost → outermost:
+    #   TraceIDMiddleware      — inject X-Trace-ID (innermost)
+    #   BodyCacheMiddleware    — cache raw body for HMAC + form parsing
+    #   RateLimitMiddleware    — token-bucket per caller (spec §6)
+    #   RequestSafetyMiddleware — size cap + timeout (spec §8) (outermost)
+    # Rationale: reject too-large / timed-out requests BEFORE caching the
+    # body or consuming rate-limit tokens.
     app.add_middleware(TraceIDMiddleware)
     app.add_middleware(BodyCacheMiddleware)
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(
+        RequestSafetyMiddleware,
+        max_request_bytes=config.max_request_bytes,
+        request_timeout_s=config.handler_timeout_s,
+    )
 
     # Error handlers
     app.add_exception_handler(RelayError, relay_error_handler)
