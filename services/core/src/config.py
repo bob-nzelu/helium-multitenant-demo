@@ -46,6 +46,7 @@ class CoreConfig:
     # ── Upstream services ─────────────────────────────────────────────────
     heartbeat_url: str = "http://localhost:9000"
     heartbeat_api_key: str = ""
+    heartbeat_api_secret: str = ""
     edge_url: str = "http://localhost:8090"
 
     # ── Ingestion (WS1) ───────────────────────────────────────────────────
@@ -162,6 +163,8 @@ class CoreConfig:
             kwargs["heartbeat_url"] = v
         if v := env("HEARTBEAT_API_KEY"):
             kwargs["heartbeat_api_key"] = v
+        if v := env("HEARTBEAT_API_SECRET"):
+            kwargs["heartbeat_api_secret"] = v
         if v := env("EDGE_URL"):
             kwargs["edge_url"] = v
 
