@@ -124,7 +124,7 @@ Audit reality: `Pronalytics\helium-multitenant-demo\services\heartbeat` (NEW) is
 8. **`services/heartbeat/src/api/test_harness/__init__.py`** (new).
 9. **`services/heartbeat/src/api/admin.py`** (61 LOC, new file) — update engine stubs returning 501 except history ([]).
 10. **`services/heartbeat/src/api/mock_auth.py`** (310 LOC) — mock auth router, activated by `HEARTBEAT_MOCK_AUTH=true`.
-11. **`services/heartbeat/src/main.py`** — conditional router registration block and `HEARTBEAT_TEST_HARNESS_ENABLED` gate for test harness routes.
+11. **`services/heartbeat/src/main.py`** — conditional router registration block; gate is `HEARTBEAT_DEMO_MODE=true` AND `HEARTBEAT_TEST_HARNESS_KEY_HASH` set. (Earlier drafts of this doc said `HEARTBEAT_TEST_HARNESS_ENABLED` — that name was never wired into the code.)
 
 **Deploy artefacts to keep in the demo repo (not ported):**
 

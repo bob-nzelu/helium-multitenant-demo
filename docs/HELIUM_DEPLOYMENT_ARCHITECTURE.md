@@ -325,7 +325,7 @@ Physical file on developer's laptop (`~/.helium/test_harness_key`) enables privi
 
 **Endpoints:** `/api/test/*` (auth/reset, data/seed, data/clear, pipeline/trigger, sse/emit, config/override)
 
-**Activation:** `HEARTBEAT_TEST_HARNESS_ENABLED=true` env var on HeartBeat.
+**Activation:** `HEARTBEAT_DEMO_MODE=true` AND `HEARTBEAT_TEST_HARNESS_KEY_HASH=<sha256-hex>` env vars on HeartBeat. (Earlier docs wrote `HEARTBEAT_TEST_HARNESS_ENABLED` — that variable name was never wired into the code; the canonical name has always been `HEARTBEAT_DEMO_MODE`. The "demo mode" framing is intentional: production deployments never set it, so a leaked key cannot mount `/api/test/*` against a production instance.)
 
 **Security:** Code is identical in dev and production. No key file = no test mode activates. HMAC-signed requests, constant-time validation, full audit logging.
 
