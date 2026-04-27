@@ -29,6 +29,7 @@ class HeartBeatBlobClient:
         self,
         base_url: str,
         api_key: str = "",
+        api_secret: str = "",
         timeout: float = 30.0,
     ) -> None:
         self._client = httpx.AsyncClient(
@@ -37,6 +38,16 @@ class HeartBeatBlobClient:
             limits=httpx.Limits(max_connections=20),
         )
         self._api_key = api_key
+        self._api_secret = api_secret
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Build the Authorization header for HeartBeat service auth.
+
+        HeartBeat expects `Bearer {api_key}:{api_secret}`.
+        """
+        if self._api_key and self._api_secret:
+            return {"Authorization": f"Bearer {self._api_key}:{self._api_secret}"}
+        return {}
 
     async def upload_blob(
         self,
@@ -63,9 +74,7 @@ class HeartBeatBlobClient:
         Raises:
             ExternalServiceError: If HeartBeat is unreachable or returns error.
         """
-        headers: dict[str, str] = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        headers: dict[str, str] = self._auth_headers()
 
         files = {"file": (filename, data, content_type)}
         form_data: dict[str, str] = {"blob_uuid": blob_uuid}
@@ -128,21 +137,21 @@ class HeartBeatBlobClient:
         """
         Download file bytes from HeartBeat.
 
-        GET /api/blobs/{blob_uuid}/download
+        POST /api/blobs/download with {"blob_uuid": ...} in the body.
+        (HeartBeat audit C-1: blob_uuid must not appear in URLs.)
 
         Retries 3x with exponential backoff on 500/502/503/timeout.
         Raises NotFoundError on 404/410 (no retry).
         Raises ExternalServiceError after exhausting retries.
         """
-        headers: dict[str, str] = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        headers: dict[str, str] = self._auth_headers()
 
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             try:
-                resp = await self._client.get(
-                    f"/api/blobs/{blob_uuid}/download",
+                resp = await self._client.post(
+                    "/api/blobs/download",
+                    json={"blob_uuid": blob_uuid},
                     headers=headers,
                 )
 
@@ -194,19 +203,19 @@ class HeartBeatBlobClient:
         """
         Fetch full tenant config from HeartBeat config.db.
 
-        GET /api/v1/heartbeat/config
+        POST /api/v1/heartbeat/config (HeartBeat audit C-2: this response
+        contains SMTP credentials, FIRS keys, and NAS config — must travel
+        over POST with mandatory service auth, never GET).
 
         Retries 3x with exponential backoff on 5xx.
         Raises ExternalServiceError on final failure.
         """
-        headers: dict[str, str] = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        headers: dict[str, str] = self._auth_headers()
 
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             try:
-                resp = await self._client.get(
+                resp = await self._client.post(
                     "/api/v1/heartbeat/config",
                     headers=headers,
                 )
@@ -259,8 +268,7 @@ class HeartBeatBlobClient:
         Non-fatal: returns None and logs warning on final failure.
         """
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        headers.update(self._auth_headers())
 
         payload: dict = {"status": status}
         if processing_stage:

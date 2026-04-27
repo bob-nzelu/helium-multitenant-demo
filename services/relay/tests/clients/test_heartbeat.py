@@ -184,7 +184,7 @@ class TestHeartBeatCheckDuplicate:
     @respx.mock
     @pytest.mark.asyncio
     async def test_not_duplicate(self, hb_client):
-        respx.get(f"{HEARTBEAT_URL}/api/dedup/check").mock(
+        respx.post(f"{HEARTBEAT_URL}/api/dedup/check").mock(
             return_value=Response(200, json={
                 "is_duplicate": False,
                 "file_hash": "abc123",
@@ -200,7 +200,7 @@ class TestHeartBeatCheckDuplicate:
     @respx.mock
     @pytest.mark.asyncio
     async def test_is_duplicate(self, hb_client):
-        respx.get(f"{HEARTBEAT_URL}/api/dedup/check").mock(
+        respx.post(f"{HEARTBEAT_URL}/api/dedup/check").mock(
             return_value=Response(200, json={
                 "is_duplicate": True,
                 "file_hash": "abc123",
@@ -215,7 +215,7 @@ class TestHeartBeatCheckDuplicate:
     @respx.mock
     @pytest.mark.asyncio
     async def test_check_duplicate_server_error(self, hb_client):
-        respx.get(f"{HEARTBEAT_URL}/api/dedup/check").mock(
+        respx.post(f"{HEARTBEAT_URL}/api/dedup/check").mock(
             return_value=Response(500, text="DB error")
         )
 
@@ -255,7 +255,7 @@ class TestHeartBeatDailyLimit:
     @respx.mock
     @pytest.mark.asyncio
     async def test_under_limit(self, hb_client):
-        respx.get(f"{HEARTBEAT_URL}/api/limits/daily").mock(
+        respx.post(f"{HEARTBEAT_URL}/api/limits/daily/check").mock(
             return_value=Response(200, json={
                 "company_id": "company-001",
                 "files_today": 10,
@@ -272,7 +272,7 @@ class TestHeartBeatDailyLimit:
     @respx.mock
     @pytest.mark.asyncio
     async def test_limit_reached(self, hb_client):
-        respx.get(f"{HEARTBEAT_URL}/api/limits/daily").mock(
+        respx.post(f"{HEARTBEAT_URL}/api/limits/daily/check").mock(
             return_value=Response(200, json={
                 "company_id": "company-001",
                 "files_today": 500,
@@ -593,7 +593,7 @@ class TestHeartBeatTransformaConfig:
             },
         }
 
-        route = respx.get(f"{HEARTBEAT_URL}/api/platform/transforma/config").mock(
+        route = respx.post(f"{HEARTBEAT_URL}/api/platform/transforma/config").mock(
             return_value=Response(200, json=config_data)
         )
 
@@ -618,7 +618,7 @@ class TestHeartBeatTransformaConfig:
             max_attempts=1,
         )
 
-        route = respx.get(f"{HEARTBEAT_URL}/api/platform/transforma/config").mock(
+        route = respx.post(f"{HEARTBEAT_URL}/api/platform/transforma/config").mock(
             return_value=Response(200, json={"modules": [], "service_keys": {}})
         )
 
@@ -630,7 +630,7 @@ class TestHeartBeatTransformaConfig:
     @respx.mock
     @pytest.mark.asyncio
     async def test_get_config_heartbeat_down(self, hb_client):
-        respx.get(f"{HEARTBEAT_URL}/api/platform/transforma/config").mock(
+        respx.post(f"{HEARTBEAT_URL}/api/platform/transforma/config").mock(
             side_effect=ConnectionError("refused")
         )
 

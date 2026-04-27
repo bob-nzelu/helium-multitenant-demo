@@ -10,14 +10,14 @@ from src.ingestion.heartbeat_client import HeartBeatBlobClient
 
 @pytest.fixture
 def client():
-    return HeartBeatBlobClient(base_url="http://heartbeat:9000", api_key="test-key")
+    return HeartBeatBlobClient(base_url="http://heartbeat:9000", api_key="test-key", api_secret="test-secret")
 
 
 class TestFetchBlob:
     @respx.mock
     @pytest.mark.asyncio
     async def test_success(self, client):
-        respx.get("http://heartbeat:9000/api/blobs/uuid-1/download").mock(
+        respx.post("http://heartbeat:9000/api/blobs/download").mock(
             return_value=httpx.Response(
                 200,
                 content=b"file content",
@@ -37,7 +37,7 @@ class TestFetchBlob:
     @respx.mock
     @pytest.mark.asyncio
     async def test_404_not_found(self, client):
-        respx.get("http://heartbeat:9000/api/blobs/uuid-1/download").mock(
+        respx.post("http://heartbeat:9000/api/blobs/download").mock(
             return_value=httpx.Response(404)
         )
         with pytest.raises(NotFoundError):
@@ -46,7 +46,7 @@ class TestFetchBlob:
     @respx.mock
     @pytest.mark.asyncio
     async def test_410_error_state(self, client):
-        respx.get("http://heartbeat:9000/api/blobs/uuid-1/download").mock(
+        respx.post("http://heartbeat:9000/api/blobs/download").mock(
             return_value=httpx.Response(410)
         )
         with pytest.raises(NotFoundError, match="error state"):
@@ -55,7 +55,7 @@ class TestFetchBlob:
     @respx.mock
     @pytest.mark.asyncio
     async def test_500_retries_then_fails(self, client):
-        route = respx.get("http://heartbeat:9000/api/blobs/uuid-1/download").mock(
+        route = respx.post("http://heartbeat:9000/api/blobs/download").mock(
             return_value=httpx.Response(500)
         )
         with pytest.raises(ExternalServiceError):
@@ -65,17 +65,17 @@ class TestFetchBlob:
     @respx.mock
     @pytest.mark.asyncio
     async def test_auth_header_sent(self, client):
-        respx.get("http://heartbeat:9000/api/blobs/uuid-1/download").mock(
+        respx.post("http://heartbeat:9000/api/blobs/download").mock(
             return_value=httpx.Response(200, content=b"data", headers={"content-type": "text/plain"})
         )
         await client.fetch_blob("uuid-1")
         request = respx.calls[0].request
-        assert request.headers["authorization"] == "Bearer test-key"
+        assert request.headers["authorization"] == "Bearer test-key:test-secret"
 
     @respx.mock
     @pytest.mark.asyncio
     async def test_empty_filename_fallback(self, client):
-        respx.get("http://heartbeat:9000/api/blobs/uuid-1/download").mock(
+        respx.post("http://heartbeat:9000/api/blobs/download").mock(
             return_value=httpx.Response(200, content=b"data", headers={"content-type": "text/plain"})
         )
         resp = await client.fetch_blob("uuid-1")

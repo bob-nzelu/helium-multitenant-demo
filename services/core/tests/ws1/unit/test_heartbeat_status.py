@@ -30,7 +30,7 @@ STATUS_URL = f"/api/v1/heartbeat/blob/{BLOB_UUID}/status"
 
 @pytest.fixture
 def client():
-    return HeartBeatBlobClient(base_url=BASE_URL, api_key="test-key", timeout=5.0)
+    return HeartBeatBlobClient(base_url=BASE_URL, api_key="test-key", api_secret="test-secret", timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -46,7 +46,7 @@ class TestUpdateBlobStatus:
 
         assert result == {"ok": True}
         request = respx.calls.last.request
-        assert request.headers["authorization"] == "Bearer test-key"
+        assert request.headers["authorization"] == "Bearer test-key:test-secret"
 
     @respx.mock
     async def test_payload_includes_all_fields(self, client):

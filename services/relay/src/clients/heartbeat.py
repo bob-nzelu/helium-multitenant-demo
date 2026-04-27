@@ -13,11 +13,13 @@ HeartBeat is Relay's PRIMARY upstream — it handles:
     - Service health monitoring (HeartBeat keeps services alive)
     - Platform services (Transforma module config)
 
-Auth model:
+Auth model (post-audit-2026-04-25):
     - Blob write/register: Optional Authorization: Bearer {user_jwt}
       (HeartBeat validates JWT in-process via Ed25519 if present)
-    - Dedup, limits, audit, metrics: No auth (internal service calls)
-    - Transforma config: Authorization: Bearer {api_key}:{api_secret}
+    - Dedup check, daily limits, tenant config, transforma config: mandatory
+      Authorization: Bearer {api_key}:{api_secret} (service credentials)
+    - Audit log, metrics report: No auth (legacy fire-and-forget paths;
+      may tighten in a later audit pass)
     - Health: No auth
 
 Audit logging and metrics are fire-and-forget: failures are logged
@@ -55,11 +57,11 @@ class HeartBeatClient(BaseClient):
         POST /api/blobs/register     → Register blob metadata (JSON)
 
         # Deduplication
-        GET  /api/dedup/check        → Check for duplicate hash
+        POST /api/dedup/check        → Check for duplicate hash
         POST /api/dedup/record       → Record processed hash
 
         # Limits
-        GET  /api/limits/daily       → Check daily usage limit
+        POST /api/limits/daily/check → Check daily usage limit
 
         # Audit (immutable, append-only)
         POST /api/audit/log          → Log audit event
@@ -67,8 +69,11 @@ class HeartBeatClient(BaseClient):
         # Metrics
         POST /api/metrics/report     → Report ingestion metrics
 
+        # Tenant config
+        POST /api/v1/heartbeat/config → Full tenant config bundle
+
         # Platform
-        GET  /api/platform/transforma/config → Transforma module config
+        POST /api/platform/transforma/config → Transforma module config
 
         # Health
         GET  /health                 → Health check
@@ -225,7 +230,10 @@ class HeartBeatClient(BaseClient):
         """
         Check if a file hash has been seen before.
 
-        GET /api/dedup/check?file_hash={64-char SHA256}
+        POST /api/dedup/check  JSON: {file_hash}
+        Authorization: Bearer {api_key}:{api_secret}
+        (HeartBeat audit M-1: SHA-256 is a content identifier and must
+        not appear in URLs/logs.)
 
         Args:
             file_hash: SHA256 hex digest of file data.
@@ -236,13 +244,17 @@ class HeartBeatClient(BaseClient):
         async def _check():
             http = self._get_http()
             headers = self.get_trace_headers()
+            if self._service_api_key and self._service_api_secret:
+                headers["Authorization"] = (
+                    f"Bearer {self._service_api_key}:{self._service_api_secret}"
+                )
 
             self._calls.append(("check_duplicate", file_hash))
 
             try:
-                resp = await http.get(
+                resp = await http.post(
                     "/api/dedup/check",
-                    params={"file_hash": file_hash},
+                    json={"file_hash": file_hash},
                     headers=headers,
                 )
             except httpx.ConnectError as e:
@@ -309,7 +321,9 @@ class HeartBeatClient(BaseClient):
         """
         Check if company has exceeded daily upload limit.
 
-        GET /api/limits/daily?company_id=&file_count=
+        POST /api/limits/daily/check  JSON: {company_id, file_count}
+        Authorization: Bearer {api_key}:{api_secret}
+        (HeartBeat audit C-4: company_id must travel in body, not URL.)
 
         Args:
             company_id: Company identifier.
@@ -321,16 +335,17 @@ class HeartBeatClient(BaseClient):
         async def _check():
             http = self._get_http()
             headers = self.get_trace_headers()
+            if self._service_api_key and self._service_api_secret:
+                headers["Authorization"] = (
+                    f"Bearer {self._service_api_key}:{self._service_api_secret}"
+                )
 
             self._calls.append(("check_daily_limit", company_id, file_count))
 
             try:
-                resp = await http.get(
-                    "/api/limits/daily",
-                    params={
-                        "company_id": company_id,
-                        "file_count": file_count,
-                    },
+                resp = await http.post(
+                    "/api/limits/daily/check",
+                    json={"company_id": company_id, "file_count": file_count},
                     headers=headers,
                 )
             except httpx.ConnectError as e:
@@ -426,8 +441,10 @@ class HeartBeatClient(BaseClient):
         """
         Fetch full tenant config from HeartBeat.
 
-        GET /api/v1/heartbeat/config
+        POST /api/v1/heartbeat/config
         Auth: Bearer {api_key}:{api_secret}
+        (HeartBeat audit C-2: response contains SMTP credentials, FIRS
+        keys, NAS config — must travel via POST.)
 
         Returns full config dict (tenant, firs, endpoints, tier_limits, etc.)
         Used at startup to populate ConfigCache.
@@ -449,7 +466,7 @@ class HeartBeatClient(BaseClient):
             self._calls.append(("fetch_config",))
 
             try:
-                resp = await http.get(
+                resp = await http.post(
                     "/api/v1/heartbeat/config",
                     headers=headers,
                 )
@@ -627,8 +644,10 @@ class HeartBeatClient(BaseClient):
         """
         Fetch Transforma modules and FIRS service keys from HeartBeat.
 
-        GET /api/platform/transforma/config
+        POST /api/platform/transforma/config
         Authorization: Bearer {api_key}:{api_secret}
+        (HeartBeat audit M-7: response contains FIRS keys; POST keeps it
+        out of HTTP caches.)
 
         Called by TransformaModuleCache at startup and every 12 hours.
 
@@ -648,7 +667,7 @@ class HeartBeatClient(BaseClient):
             self._calls.append(("get_transforma_config",))
 
             try:
-                resp = await http.get(
+                resp = await http.post(
                     "/api/platform/transforma/config",
                     headers=headers,
                 )

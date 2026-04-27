@@ -77,7 +77,7 @@ def mock_heartbeat_http():
     """
     with respx.mock:
         # Startup: module_cache.load_all() calls this
-        respx.get("http://localhost:9000/api/platform/transforma/config").mock(
+        respx.post("http://localhost:9000/api/platform/transforma/config").mock(
             return_value=httpx.Response(200, json=TRANSFORMA_CONFIG_RESPONSE)
         )
 
@@ -88,7 +88,7 @@ def mock_heartbeat_http():
 
         # Ingestion pipeline: dedup check, blob write, dedup record, register,
         # daily limit, audit, metrics — mock all with success responses
-        respx.get("http://localhost:9000/api/dedup/check").mock(
+        respx.post("http://localhost:9000/api/dedup/check").mock(
             return_value=httpx.Response(200, json={
                 "is_duplicate": False,
                 "file_hash": "mock",
@@ -122,7 +122,7 @@ def mock_heartbeat_http():
             })
         )
 
-        respx.get("http://localhost:9000/api/limits/daily").mock(
+        respx.post("http://localhost:9000/api/limits/daily/check").mock(
             return_value=httpx.Response(200, json={
                 "company_id": "mock",
                 "files_today": 0,
