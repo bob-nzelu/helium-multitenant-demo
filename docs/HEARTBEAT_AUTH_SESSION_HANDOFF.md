@@ -152,7 +152,7 @@ GET  /api/auth/sessions               — list active sessions for current user
    - `POST /api/test/sse/emit` — push custom SSE event
    - `POST /api/test/config/override` — temporarily override config
    - `GET /api/test/state` — dump system state for debugging
-4. Register conditionally: `HEARTBEAT_TEST_HARNESS_ENABLED=true`
+4. Register conditionally: `HEARTBEAT_DEMO_MODE=true` AND `HEARTBEAT_TEST_HARNESS_KEY_HASH=<sha256-hex>` (the gate `HEARTBEAT_TEST_HARNESS_ENABLED` mentioned in earlier drafts was never wired into code)
 5. All test operations are audit-logged
 
 ### Task 7: Update Engine (Foundation)

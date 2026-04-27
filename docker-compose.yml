@@ -72,7 +72,12 @@ services:
       - HEARTBEAT_AUTO_MIGRATE=true
       - HEARTBEAT_TIER=test
       - HEARTBEAT_MAX_CONCURRENT_SESSIONS=3
-      - HEARTBEAT_TEST_HARNESS_ENABLED=true
+      # HEARTBEAT_DEMO_MODE (not HEARTBEAT_TEST_HARNESS_ENABLED) is the gate
+      # the HeartBeat code reads in src/auth/test_harness_manager.py. The
+      # name reflects the security intent: demo-mode is the hard gate that
+      # production deployments never set, so leaked harness keys cannot
+      # mount /api/test/* against a production instance.
+      - HEARTBEAT_DEMO_MODE=true
       - HEARTBEAT_TEST_HARNESS_KEY_HASH=786ac05ff1f90d133056376fa0a65188cab837fe4450d47d1be924bd54d017d3
       - HEARTBEAT_PG_HOST=postgres
       - HEARTBEAT_PG_PORT=5432
