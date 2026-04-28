@@ -1,0 +1,25 @@
+# Normalise line endings on commit so EC2 stashes / Windows edits do not
+# produce CRLF↔LF noise that masquerades as substantive diffs.
+#
+# Background: the 2026-04-27 phase-1b-relay-hotpatch stash on EC2 #1
+# captured 828 insertions / 828 deletions across services/relay/src/api/
+# that turned out to be pure CRLF churn — no real changes.
+# A .gitattributes prevents the recurrence by canonicalising every
+# committed file to LF.
+
+*               text=auto eol=lf
+
+# Binary types (do not normalise)
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.pdf           binary
+*.zip           binary
+*.gz            binary
+*.tar           binary
+*.dump          binary
+*.db            binary
+*.sqlite        binary
+*.sqlite3       binary
