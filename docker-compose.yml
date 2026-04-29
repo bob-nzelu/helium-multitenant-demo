@@ -84,9 +84,15 @@ services:
       - HEARTBEAT_PG_USER=${PG_USER:-helium}
       - HEARTBEAT_PG_PASSWORD=${PG_PASSWORD:-helium_demo_2026}
       - HEARTBEAT_PG_DATABASE=${PG_DATABASE:-helium}
+      # Phase 3B: signed license verification (read abbey license while shared container)
+      - HEARTBEAT_LICENSE_PATH=/etc/helium/abbey/license.json
+      - HEARTBEAT_LICENSE_REQUIRED=true
     volumes:
       - heartbeat-data:/app/databases
       - heartbeat-blobs:/app/data/blobs
+      - ./licenses/abbey.license.json:/etc/helium/abbey/license.json:ro
+      - ./licenses/adansi.license.json:/etc/helium/adansi/license.json:ro
+      - ./licenses/redeploy-probe.license.json:/etc/helium/redeploy-probe/license.json:ro
     depends_on:
       postgres:
         condition: service_healthy
