@@ -87,6 +87,12 @@ services:
       # Phase 3B: signed license verification (read abbey license while shared container)
       - HEARTBEAT_LICENSE_PATH=/etc/helium/abbey/license.json
       - HEARTBEAT_LICENSE_REQUIRED=true
+      # HMAC s2s nonce dedup store (helium-services PR #100 — HMAC_S2S_MIGRATION_SPEC §6).
+      # HB defaults to redis://127.0.0.1:6379/0 which won't resolve inside the
+      # heartbeat container; explicit redis://redis:6379/0 points at the
+      # shared Redis service. Required for HB to accept any s2s HMAC traffic;
+      # without this the nonce store fail-closes 503 NONCE_STORE_UNAVAILABLE.
+      - HEARTBEAT_REDIS_URL=redis://redis:6379/0
     volumes:
       - heartbeat-data:/app/databases
       - heartbeat-blobs:/app/data/blobs
@@ -95,6 +101,8 @@ services:
       - ./licenses/redeploy-probe.license.json:/etc/helium/redeploy-probe/license.json:ro
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:9000/health')"]
