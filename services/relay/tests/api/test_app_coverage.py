@@ -26,6 +26,12 @@ class TestCreateAppDefaults:
             "RELAY_PORT": "8082",
             "RELAY_REQUIRE_ENCRYPTION": "false",
             "RELAY_INTERNAL_SERVICE_TOKEN": "test-token",
+            # Post-2026-05-08 HMAC s2s cutover: HeartBeatClient asserts a
+            # non-empty signing key on every fetch_config call. Without it
+            # the lifespan retries 5x and times out. Set a test key so
+            # ``RelayConfig.from_env()`` carries it through to the client.
+            "RELAY_HEARTBEAT_API_KEY": "test-relay-key",
+            "RELAY_S2S_SIGNING_KEY": "0123456789abcdef" * 4,
         }
         with patch.dict(os.environ, env, clear=False):
             app = create_app(config=None, api_key_secrets={})
@@ -46,6 +52,8 @@ class TestCreateAppDefaults:
             instance_id="relay-test",
             require_encryption=False,
             internal_service_token="test-token",
+            heartbeat_api_key="test-relay-key",
+            heartbeat_s2s_signing_key="0123456789abcdef" * 4,
         )
         with patch.dict(os.environ, env, clear=False):
             app = create_app(config=config, api_key_secrets=None)
@@ -62,6 +70,8 @@ class TestCreateAppDefaults:
             instance_id="relay-test",
             require_encryption=False,
             internal_service_token="test-token",
+            heartbeat_api_key="test-relay-key",
+            heartbeat_s2s_signing_key="0123456789abcdef" * 4,
         )
         # Ensure dev keys are not set
         env_remove = {"RELAY_DEV_API_KEY": "", "RELAY_DEV_API_SECRET": ""}

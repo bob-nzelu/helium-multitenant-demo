@@ -22,6 +22,10 @@ def test_config():
         instance_id="relay-degraded-test",
         require_encryption=False,
         internal_service_token="test-token",
+        # HMAC s2s migration (post-2026-05-08): non-empty signing key
+        # required for HeartBeatClient lifespan startup calls.
+        heartbeat_api_key="test-relay-key",
+        heartbeat_s2s_signing_key="0123456789abcdef" * 4,
     )
 
 

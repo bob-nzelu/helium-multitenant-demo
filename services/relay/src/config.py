@@ -32,8 +32,9 @@ class RelayConfig:
     # ── Upstream services ─────────────────────────────────────────────────
     core_api_url: str = "http://localhost:8080"
     heartbeat_api_url: str = "http://localhost:9000"
-    heartbeat_api_key: str = ""       # RELAY_HEARTBEAT_API_KEY (service creds for HeartBeat)
-    heartbeat_api_secret: str = ""    # RELAY_HEARTBEAT_API_SECRET
+    heartbeat_api_key: str = ""       # RELAY_HEARTBEAT_API_KEY (service api_key for HeartBeat)
+    heartbeat_api_secret: str = ""    # RELAY_HEARTBEAT_API_SECRET (legacy bcrypt secret; retained for back-compat — HMAC cutover means HB no longer reads it on the request path; safe to leave empty in fresh deploys)
+    heartbeat_s2s_signing_key: str = ""  # RELAY_S2S_SIGNING_KEY — 64-hex per-service HMAC key from HB's startup WARNING log; required post-HMAC-cutover (2026-05-08) for every Relay→HB call hitting verify_service_credentials. NTP discipline required (skew >300s causes HMAC_TIMESTAMP_SKEW). See HMAC_S2S_MIGRATION_SPEC.md §1.3 + §2.2.
 
     # ── Encryption ────────────────────────────────────────────────────────
     require_encryption: bool = True
@@ -127,6 +128,13 @@ class RelayConfig:
             kwargs["heartbeat_api_key"] = v
         if v := env("HEARTBEAT_API_SECRET"):
             kwargs["heartbeat_api_secret"] = v
+        # The HMAC s2s signing key uses ``RELAY_S2S_SIGNING_KEY`` (NOT
+        # ``RELAY_HEARTBEAT_S2S_SIGNING_KEY``) per HMAC_S2S_MIGRATION_SPEC
+        # §1.3 + RELAY_NEXT_STEPS_NOTE §1.2 — the operator pulls the
+        # value from HB's startup WARNING log and pastes it into the
+        # caller-side env under that exact name.
+        if v := os.environ.get("RELAY_S2S_SIGNING_KEY"):
+            kwargs["heartbeat_s2s_signing_key"] = v
 
         # ── Encryption
         if v := env("REQUIRE_ENCRYPTION"):

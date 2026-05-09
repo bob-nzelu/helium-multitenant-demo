@@ -76,6 +76,27 @@ def mock_heartbeat_http():
     The respx router intercepts httpx calls to localhost:9000.
     """
     with respx.mock:
+        # Startup: config_cache.load() calls this. Pre-existing rot —
+        # the lifespan has called fetch_config() since the initial repo
+        # commit, but this mock was never wired, so every lifespan test
+        # was timing out on origin/main. Surgically wired here as part
+        # of the HMAC s2s catchup chip (the migrated fetch_config now
+        # uses HMAC headers and asserts a non-empty signing key, so the
+        # mock-gap surfaces immediately during this PR's testing).
+        respx.post("http://localhost:9000/api/v1/heartbeat/config").mock(
+            return_value=httpx.Response(200, json={
+                "tenant": {
+                    "tenant_id": "test-tenant-001",
+                    "tenant_name": "Test Tenant",
+                    "tier": "test",
+                },
+                "tier_limits": {
+                    "daily_upload_limit": 500,
+                },
+                "service_endpoints": [],
+            })
+        )
+
         # Startup: module_cache.load_all() calls this
         respx.post("http://localhost:9000/api/platform/transforma/config").mock(
             return_value=httpx.Response(200, json=TRANSFORMA_CONFIG_RESPONSE)

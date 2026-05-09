@@ -13,28 +13,44 @@ HeartBeat is Relay's PRIMARY upstream — it handles:
     - Service health monitoring (HeartBeat keeps services alive)
     - Platform services (Transforma module config)
 
-Auth model (post-audit-2026-04-25):
-    - Blob write/register: Optional Authorization: Bearer {user_jwt}
-      (HeartBeat validates JWT in-process via Ed25519 if present)
-    - Dedup check, daily limits, tenant config, transforma config: mandatory
-      Authorization: Bearer {api_key}:{api_secret} (service credentials)
-    - Audit log, metrics report: No auth (legacy fire-and-forget paths;
-      may tighten in a later audit pass)
-    - Health: No auth
+Auth model (post-HMAC-cutover 2026-05-09 per HMAC_S2S_MIGRATION_SPEC.md
++ RELAY_NEXT_STEPS_NOTE_2026_05_09 §1):
+    - Blob write/register: Optional ``Authorization: Bearer {user_jwt}``
+      (HeartBeat validates JWT in-process via Ed25519 if present).
+    - Dedup check, daily limits, tenant config, transforma config: §3.3
+      HMAC-SHA256 service-to-service auth. Replaces the legacy
+      ``Authorization: Bearer {api_key}:{api_secret}`` form which
+      HeartBeat now rejects with ``401 BEARER_S2S_REMOVED`` (locked
+      decision L5, 2026-05-08). Headers built via the
+      ``build_s2s_hmac_headers()`` helper.
+    - Audit log: HMAC headers added proactively per RELAY_NEXT_STEPS_NOTE
+      §4.2 ("wire your audit emission via the same helper now so you
+      get auth-enabled-for-free later" once D-audit fix lands). HB
+      currently ignores the headers; harmless.
+    - Metrics report, dedup record: No auth (not in §1.5 migration list).
+      Follow-up chip if HB tightens auth on these endpoints.
+    - Health: No auth.
 
 Audit logging and metrics are fire-and-forget: failures are logged
 locally but NEVER block the main request flow.
+
+Body-bytes discipline (HMAC_S2S_MIGRATION_SPEC §8.1 step 3): every
+HMAC-signed call serialises the JSON payload to bytes ONCE, signs
+those bytes, then sends them via ``content=...`` (NOT ``json=...``)
+so the wire matches what we signed. Never sign a Python dict and
+serialise separately.
 """
 
 import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
 
 from .base import BaseClient
+from ._s2s_hmac import build_s2s_hmac_headers
 from ..errors import (
     HeartBeatUnavailableError,
     JWTRejectedError,
@@ -87,6 +103,7 @@ class HeartBeatClient(BaseClient):
         trace_id: Optional[str] = None,
         service_api_key: str = "",
         service_api_secret: str = "",
+        service_signing_key: str = "",
     ):
         super().__init__(
             max_attempts=max_attempts,
@@ -95,7 +112,15 @@ class HeartBeatClient(BaseClient):
         )
         self.heartbeat_api_url = heartbeat_api_url.rstrip("/")
         self._service_api_key = service_api_key
+        # ``service_api_secret`` retained for backwards compat / config
+        # readers that still reference it. The bcrypt'd hash is no longer
+        # used by HB on the request path post-HMAC cutover.
         self._service_api_secret = service_api_secret
+        # ``service_signing_key`` = the per-service HMAC signing key from
+        # HB's startup WARNING log (``RELAY_S2S_SIGNING_KEY`` env var).
+        # 64-hex chars (32 bytes). Required for every Relay→HB call that
+        # hits a ``verify_service_credentials``-protected endpoint.
+        self._service_signing_key = service_signing_key
 
         # Shared httpx client — created lazily, closed explicitly
         self._http: Optional[httpx.AsyncClient] = None
@@ -104,6 +129,52 @@ class HeartBeatClient(BaseClient):
         self._calls: list = []
         # Track audit events for testing
         self._audit_events: List[Dict[str, Any]] = []
+
+    # ── HMAC s2s helper ────────────────────────────────────────────────────
+
+    def _s2s_headers(
+        self,
+        *,
+        method: str,
+        path: str,
+        body_bytes: bytes,
+        content_type: str = "application/json",
+    ) -> Dict[str, str]:
+        """Build the headers for an HMAC-signed Relay→HB request.
+
+        Combines the four canonical HMAC headers (per
+        ``HMAC_S2S_MIGRATION_SPEC.md`` §2) with the trace headers from
+        ``BaseClient.get_trace_headers()`` and an explicit
+        ``Content-Type``. The caller passes ``body_bytes`` — the EXACT
+        bytes that will be sent on the wire (per §8.1 step 3
+        body-bytes discipline) — and uses ``content=body_bytes`` on the
+        httpx request.
+        """
+        headers = dict(self.get_trace_headers())
+        headers.update(
+            build_s2s_hmac_headers(
+                method=method,
+                path=path,
+                body_bytes=body_bytes,
+                api_key=self._service_api_key,
+                signing_key=self._service_signing_key,
+            )
+        )
+        if content_type:
+            headers["Content-Type"] = content_type
+        return headers
+
+    @staticmethod
+    def _json_bytes(payload: Optional[Dict[str, Any]]) -> bytes:
+        """Serialise a JSON payload to bytes ONCE.
+
+        Empty/None payload → ``b""`` so the caller can sign an empty
+        body the same way HB verifies it (``sha256(b"")`` per spec §2.2,
+        not the SHA of the literal string ``""``).
+        """
+        if not payload:
+            return b""
+        return json.dumps(payload).encode("utf-8")
 
     def _get_http(self) -> httpx.AsyncClient:
         """Get or create the shared httpx client."""
@@ -230,8 +301,11 @@ class HeartBeatClient(BaseClient):
         """
         Check if a file hash has been seen before.
 
-        POST /api/dedup/check  JSON: {file_hash}
-        Authorization: Bearer {api_key}:{api_secret}
+        ``POST /api/dedup/check`` — JSON: ``{file_hash}``.
+        Auth: §3.3 HMAC-SHA256 (post-cutover 2026-05-08 per
+        ``HMAC_S2S_MIGRATION_SPEC.md`` §2). Bearer api_key:api_secret
+        was rejected with ``401 BEARER_S2S_REMOVED`` from this date.
+
         (HeartBeat audit M-1: SHA-256 is a content identifier and must
         not appear in URLs/logs.)
 
@@ -239,22 +313,25 @@ class HeartBeatClient(BaseClient):
             file_hash: SHA256 hex digest of file data.
 
         Returns:
-            {is_duplicate, file_hash, original_queue_id}
+            ``{is_duplicate, file_hash, original_queue_id}``
         """
+        path = "/api/dedup/check"
+        body_bytes = self._json_bytes({"file_hash": file_hash})
+
         async def _check():
             http = self._get_http()
-            headers = self.get_trace_headers()
-            if self._service_api_key and self._service_api_secret:
-                headers["Authorization"] = (
-                    f"Bearer {self._service_api_key}:{self._service_api_secret}"
-                )
+            headers = self._s2s_headers(
+                method="POST",
+                path=path,
+                body_bytes=body_bytes,
+            )
 
             self._calls.append(("check_duplicate", file_hash))
 
             try:
                 resp = await http.post(
-                    "/api/dedup/check",
-                    json={"file_hash": file_hash},
+                    path,
+                    content=body_bytes,
                     headers=headers,
                 )
             except httpx.ConnectError as e:
@@ -321,8 +398,10 @@ class HeartBeatClient(BaseClient):
         """
         Check if company has exceeded daily upload limit.
 
-        POST /api/limits/daily/check  JSON: {company_id, file_count}
-        Authorization: Bearer {api_key}:{api_secret}
+        ``POST /api/limits/daily/check`` — JSON:
+        ``{company_id, file_count}``.
+        Auth: §3.3 HMAC-SHA256 (post-cutover 2026-05-08).
+
         (HeartBeat audit C-4: company_id must travel in body, not URL.)
 
         Args:
@@ -330,22 +409,27 @@ class HeartBeatClient(BaseClient):
             file_count: Number of files in this request.
 
         Returns:
-            {company_id, files_today, daily_limit, limit_reached, remaining}
+            ``{company_id, files_today, daily_limit, limit_reached, remaining}``
         """
+        path = "/api/limits/daily/check"
+        body_bytes = self._json_bytes(
+            {"company_id": company_id, "file_count": file_count}
+        )
+
         async def _check():
             http = self._get_http()
-            headers = self.get_trace_headers()
-            if self._service_api_key and self._service_api_secret:
-                headers["Authorization"] = (
-                    f"Bearer {self._service_api_key}:{self._service_api_secret}"
-                )
+            headers = self._s2s_headers(
+                method="POST",
+                path=path,
+                body_bytes=body_bytes,
+            )
 
             self._calls.append(("check_daily_limit", company_id, file_count))
 
             try:
                 resp = await http.post(
-                    "/api/limits/daily/check",
-                    json={"company_id": company_id, "file_count": file_count},
+                    path,
+                    content=body_bytes,
                     headers=headers,
                 )
             except httpx.ConnectError as e:
@@ -441,33 +525,37 @@ class HeartBeatClient(BaseClient):
         """
         Fetch full tenant config from HeartBeat.
 
-        POST /api/v1/heartbeat/config
-        Auth: Bearer {api_key}:{api_secret}
+        ``POST /api/v1/heartbeat/config`` (empty body).
+        Auth: §3.3 HMAC-SHA256 (post-cutover 2026-05-08).
+
         (HeartBeat audit C-2: response contains SMTP credentials, FIRS
         keys, NAS config — must travel via POST.)
 
-        Returns full config dict (tenant, firs, endpoints, tier_limits, etc.)
-        Used at startup to populate ConfigCache.
+        Returns full config dict (tenant, firs, endpoints, tier_limits,
+        etc.). Used at startup to populate ConfigCache.
 
         Raises:
             HeartBeatUnavailableError: If HeartBeat is unreachable.
             TransientError: If HeartBeat returns 5xx.
         """
+        path = "/api/v1/heartbeat/config"
+        # Empty-body POST: sign sha256(b"") per spec §2.2.
+        body_bytes = b""
+
         async def _fetch():
             http = self._get_http()
-            headers = self.get_trace_headers()
-
-            # Use service credentials for config endpoint
-            if self._service_api_key and self._service_api_secret:
-                headers["Authorization"] = (
-                    f"Bearer {self._service_api_key}:{self._service_api_secret}"
-                )
+            headers = self._s2s_headers(
+                method="POST",
+                path=path,
+                body_bytes=body_bytes,
+            )
 
             self._calls.append(("fetch_config",))
 
             try:
                 resp = await http.post(
-                    "/api/v1/heartbeat/config",
+                    path,
+                    content=body_bytes,
                     headers=headers,
                 )
             except httpx.ConnectError as e:
@@ -536,7 +624,6 @@ class HeartBeatClient(BaseClient):
             self._calls.append(("audit_log", event_type))
 
             http = self._get_http()
-            headers = self.get_trace_headers()
 
             payload = {
                 "service": service,
@@ -546,10 +633,28 @@ class HeartBeatClient(BaseClient):
                 "trace_id": self.trace_id,
             }
 
+            # Per RELAY_NEXT_STEPS_NOTE §4.2: wire HMAC headers
+            # proactively so we get auth-enabled-for-free once D-audit
+            # closes (today /api/audit/log has NO auth on HB; HB will
+            # ignore HMAC headers when present). When the signing key
+            # isn't configured yet (early-deploy / dev), degrade to the
+            # legacy unauthenticated wire to keep audit fire-and-forget.
+            path = "/api/audit/log"
+            body_bytes = self._json_bytes(payload)
+            if self._service_signing_key and self._service_api_key:
+                headers = self._s2s_headers(
+                    method="POST",
+                    path=path,
+                    body_bytes=body_bytes,
+                )
+            else:
+                headers = dict(self.get_trace_headers())
+                headers["Content-Type"] = "application/json"
+
             try:
                 resp = await http.post(
-                    "/api/audit/log",
-                    json=payload,
+                    path,
+                    content=body_bytes,
                     headers=headers,
                 )
                 if not resp.is_success:
@@ -644,31 +749,34 @@ class HeartBeatClient(BaseClient):
         """
         Fetch Transforma modules and FIRS service keys from HeartBeat.
 
-        POST /api/platform/transforma/config
-        Authorization: Bearer {api_key}:{api_secret}
+        ``POST /api/platform/transforma/config`` (empty body).
+        Auth: §3.3 HMAC-SHA256 (post-cutover 2026-05-08).
+
         (HeartBeat audit M-7: response contains FIRS keys; POST keeps it
         out of HTTP caches.)
 
         Called by TransformaModuleCache at startup and every 12 hours.
 
         Returns:
-            {modules: [...], service_keys: {...}}
+            ``{modules: [...], service_keys: {...}}``
         """
+        path = "/api/platform/transforma/config"
+        body_bytes = b""
+
         async def _get_config():
             http = self._get_http()
-            headers = self.get_trace_headers()
-
-            # Service credentials for platform endpoint
-            if self._service_api_key and self._service_api_secret:
-                headers["Authorization"] = (
-                    f"Bearer {self._service_api_key}:{self._service_api_secret}"
-                )
+            headers = self._s2s_headers(
+                method="POST",
+                path=path,
+                body_bytes=body_bytes,
+            )
 
             self._calls.append(("get_transforma_config",))
 
             try:
                 resp = await http.post(
-                    "/api/platform/transforma/config",
+                    path,
+                    content=body_bytes,
                     headers=headers,
                 )
             except httpx.ConnectError as e:

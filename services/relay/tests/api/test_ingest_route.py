@@ -35,6 +35,10 @@ def test_config():
         max_total_size_mb=30.0,
         allowed_extensions=(".pdf", ".xml", ".json", ".csv", ".xlsx"),
         internal_service_token="test-internal-token",
+        # HMAC s2s migration (post-2026-05-08): non-empty signing key
+        # required by HeartBeatClient + IntrospectClient.
+        heartbeat_api_key="test-relay-key",
+        heartbeat_s2s_signing_key="0123456789abcdef" * 4,
     )
 
 

@@ -18,6 +18,12 @@ def test_config():
         instance_id="relay-metrics-test",
         require_encryption=False,
         internal_service_token="test-token",
+        # Post-2026-05-08 HMAC s2s cutover (HMAC_S2S_MIGRATION_SPEC):
+        # HeartBeatClient + IntrospectClient need a non-empty signing key
+        # to construct Authorization-replacement headers. Mocked HB endpoints
+        # ignore the value; only the helper's pre-flight check needs it.
+        heartbeat_api_key="test-relay-key",
+        heartbeat_s2s_signing_key="0123456789abcdef" * 4,
     )
 
 
