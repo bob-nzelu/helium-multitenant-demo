@@ -85,17 +85,22 @@ def create_app(
         # ── Startup ──────────────────────────────────────────────────
         logger.info(f"Relay-API starting — {config.instance_id}:{config.port}")
 
-        # Clients
+        # Clients — HMAC s2s post-cutover 2026-05-08 (HMAC_S2S_MIGRATION_SPEC).
+        # The signing key comes from RELAY_S2S_SIGNING_KEY (config field
+        # ``heartbeat_s2s_signing_key``); HB rejects Bearer api_key:api_secret
+        # with 401 BEARER_S2S_REMOVED.
         heartbeat = HeartBeatClient(
             heartbeat_api_url=config.heartbeat_api_url,
             timeout=config.request_timeout_s,
             service_api_key=config.heartbeat_api_key,
             service_api_secret=config.heartbeat_api_secret,
+            service_signing_key=config.heartbeat_s2s_signing_key,
         )
         introspect_client = IntrospectClient(
             heartbeat_url=config.heartbeat_api_url,
             service_api_key=config.heartbeat_api_key,
             service_api_secret=config.heartbeat_api_secret,
+            service_signing_key=config.heartbeat_s2s_signing_key,
             timeout_s=config.request_timeout_s,
         )
         core = CoreClient(

@@ -20,6 +20,8 @@ def test_config():
         instance_id="relay-health-test",
         require_encryption=False,
         internal_service_token="test-token",
+        heartbeat_api_key="test-relay-key",
+        heartbeat_s2s_signing_key="0123456789abcdef" * 4,
     )
 
 

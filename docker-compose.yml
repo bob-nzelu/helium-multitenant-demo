@@ -124,7 +124,19 @@ services:
       - RELAY_REQUIRE_ENCRYPTION=false
       - RELAY_HEARTBEAT_API_URL=http://heartbeat:9000
       - RELAY_HEARTBEAT_API_KEY=${RELAY_HEARTBEAT_API_KEY:-rl_test_relay001}
+      # Legacy bcrypt secret retained for back-compat with the §3.2
+      # Bearer path. HB no longer reads it on the request path post-
+      # 2026-05-08 cutover (HMAC_S2S_MIGRATION_SPEC §5.5); safe to leave
+      # default in dev. The §3.3 HMAC signing key below replaces it.
       - RELAY_HEARTBEAT_API_SECRET=${RELAY_HEARTBEAT_API_SECRET:-secret-for-test-key-001}
+      # §3.3 HMAC s2s signing key, generated per-service by HB's
+      # bootstrap (HMAC_S2S_MIGRATION_SPEC §5.3) and logged at WARNING
+      # on startup. Operator copies it from the HB log into .env per
+      # RELAY_NEXT_STEPS_NOTE_2026_05_09 §1.3. Without this set, every
+      # Relay→HB call hitting verify_service_credentials raises
+      # ValueError loudly (no silent unsigned wire). NTP discipline
+      # required: skew >300s causes HMAC_TIMESTAMP_SKEW 401s.
+      - RELAY_S2S_SIGNING_KEY=${RELAY_S2S_SIGNING_KEY:-}
       - RELAY_CORE_API_URL=http://core:8080
       - RELAY_TENANTS_FILE=/app/tenants.json
       - RELAY_DATABASE_URL=postgresql://${PG_USER:-helium}:${PG_PASSWORD:-helium_demo_2026}@postgres:5432/${PG_DATABASE:-helium}

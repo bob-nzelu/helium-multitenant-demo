@@ -23,6 +23,12 @@ def test_config():
         max_total_size_mb=30.0,
         allowed_extensions=(".pdf", ".xml", ".json", ".csv", ".xlsx"),
         internal_service_token="test-internal-token",
+        # Post-2026-05-08 HMAC s2s cutover: HeartBeatClient + IntrospectClient
+        # require a non-empty signing key. The autouse fixture in
+        # tests/api/conftest.py mocks every HB endpoint, so the value never
+        # leaves the process — but the helper raises ValueError on empty input.
+        heartbeat_api_key="test-relay-key",
+        heartbeat_s2s_signing_key="0123456789abcdef" * 4,
     )
 
 

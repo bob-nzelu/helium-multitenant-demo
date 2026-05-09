@@ -1,22 +1,37 @@
 """
 HeartBeat introspect client.
 
-Per BACKEND_SERVICE_AUTH_AND_ABUSE_SPEC.md §3.1 and §4, backend services
-verify user JWTs by calling POST /api/auth/introspect on HeartBeat. This
-module wraps that call with the exact request/response shape, a small
-cache hit (single-request only, never cross-request), and the error-code
-→ HTTP status mapping defined in the spec.
+Per ``BACKEND_SERVICE_AUTH_AND_ABUSE_SPEC.md`` §3.1 and §4, backend
+services verify user JWTs by calling ``POST /api/auth/introspect`` on
+HeartBeat. This module wraps that call with the exact request/response
+shape, a small cache hit (single-request only, never cross-request),
+and the error-code → HTTP status mapping defined in the spec.
 
-No local JWT validation happens here. The raw JWT is handed to HeartBeat;
-HeartBeat is the sole source of truth for identity (spec §5.1).
+Auth (post-HMAC-cutover 2026-05-08 per ``HMAC_S2S_MIGRATION_SPEC.md``
++ ``RELAY_NEXT_STEPS_NOTE_2026_05_09`` §1.5): §3.3 HMAC-SHA256 service
+auth on the introspect call itself, with the four canonical headers
+built via :func:`build_s2s_hmac_headers`. The legacy
+``Authorization: Bearer api_key:api_secret`` form is rejected with
+``401 BEARER_S2S_REMOVED``. The user JWT being introspected rides in
+the JSON body, unchanged.
+
+No local JWT validation happens here. The raw JWT is handed to
+HeartBeat; HeartBeat is the sole source of truth for identity
+(spec §5.1).
+
+Body-bytes discipline (``HMAC_S2S_MIGRATION_SPEC`` §8.1 step 3): the
+JSON payload is serialised to bytes ONCE, signed, and sent via
+``content=...`` so the wire matches what we signed.
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import httpx
 
+from ._s2s_hmac import build_s2s_hmac_headers
 from ..errors import (
     AuthenticationFailedError,
     HeartBeatUnavailableError,
@@ -74,24 +89,39 @@ _ERROR_HTTP_MAP = {
 }
 
 
-class IntrospectClient:
-    """
-    Thin async HTTP client for POST /api/auth/introspect.
+_INTROSPECT_PATH = "/api/auth/introspect"
 
-    Uses the service's own api_key:api_secret to authenticate the introspect
-    call itself (spec §3.1). The JWT being introspected rides in the JSON body.
+
+class IntrospectClient:
+    """Thin async HTTP client for ``POST /api/auth/introspect``.
+
+    Authenticates the introspect call itself with §3.3 HMAC-SHA256
+    headers built from the service's ``api_key`` plus the per-service
+    signing key from HB's startup log
+    (``RELAY_S2S_SIGNING_KEY``). The user JWT being introspected rides
+    in the JSON body.
     """
 
     def __init__(
         self,
         heartbeat_url: str,
         service_api_key: str,
-        service_api_secret: str,
+        service_api_secret: str = "",
+        service_signing_key: str = "",
         timeout_s: float = 5.0,
     ):
-        self._url = heartbeat_url.rstrip("/") + "/api/auth/introspect"
+        # ``heartbeat_url`` is kept whole so we can derive the
+        # ``path`` (used in the HMAC signing input) at request time
+        # without re-parsing.
+        self._heartbeat_url = heartbeat_url.rstrip("/")
+        self._url = self._heartbeat_url + _INTROSPECT_PATH
         self._service_api_key = service_api_key
+        # Retained for backwards compatibility / config readers; HB no
+        # longer accepts the bcrypt-hashed secret on the request path
+        # post-HMAC cutover.
         self._service_api_secret = service_api_secret
+        # Required for HMAC. 64-hex chars from HB's startup WARNING log.
+        self._service_signing_key = service_signing_key
         self._timeout_s = timeout_s
         self._http: Optional[httpx.AsyncClient] = None
 
@@ -112,36 +142,52 @@ class IntrospectClient:
         required_permission: Optional[str] = None,
         required_within_seconds: Optional[int] = None,
     ) -> IntrospectResult:
-        """
-        Verify a user JWT against HeartBeat.
+        """Verify a user JWT against HeartBeat.
 
-        Returns IntrospectResult on active=true.
-        Raises mapped Relay errors on active=false per spec §3.1.
-        Raises HeartBeatUnavailableError if HB is unreachable or returns 5xx.
+        Returns ``IntrospectResult`` on ``active=true``.
+        Raises mapped Relay errors on ``active=false`` per spec §3.1.
+        Raises ``HeartBeatUnavailableError`` if HB is unreachable or
+        returns 5xx.
         """
-        if not self._service_api_key or not self._service_api_secret:
+        if not self._service_api_key:
             raise AuthenticationFailedError(
-                "Relay has no HeartBeat service credentials configured — "
-                "cannot introspect user JWTs. Check RELAY_HEARTBEAT_API_KEY/_SECRET."
+                "Relay has no HeartBeat service api_key configured — "
+                "cannot introspect user JWTs. Check RELAY_HEARTBEAT_API_KEY."
+            )
+        if not self._service_signing_key:
+            raise AuthenticationFailedError(
+                "Relay has no HeartBeat s2s signing key configured — "
+                "cannot introspect user JWTs. Pull RELAY_S2S_SIGNING_KEY "
+                "from HB's startup WARNING log per "
+                "RELAY_NEXT_STEPS_NOTE_2026_05_09 §1.3."
             )
 
-        auth_header = f"Bearer {self._service_api_key}:{self._service_api_secret}"
-        headers = {
-            "Authorization": auth_header,
-            "Content-Type": "application/json",
-        }
-        if trace_id:
-            headers["X-Trace-ID"] = trace_id
-
+        # Build the request body ONCE (per spec §8.1 step 3 body-bytes
+        # discipline) so the bytes we sign equal the bytes httpx puts on
+        # the wire via ``content=``.
         payload: Dict[str, Any] = {"token": jwt_token}
         if required_permission is not None:
             payload["required_permission"] = required_permission
         if required_within_seconds is not None:
             payload["required_within_seconds"] = required_within_seconds
+        body_bytes = json.dumps(payload).encode("utf-8")
+
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        headers.update(
+            build_s2s_hmac_headers(
+                method="POST",
+                path=_INTROSPECT_PATH,
+                body_bytes=body_bytes,
+                api_key=self._service_api_key,
+                signing_key=self._service_signing_key,
+            )
+        )
+        if trace_id:
+            headers["X-Trace-ID"] = trace_id
 
         try:
             resp = await self._client().post(
-                self._url, json=payload, headers=headers
+                self._url, content=body_bytes, headers=headers
             )
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as e:
             logger.warning(
@@ -156,12 +202,14 @@ class IntrospectClient:
         if resp.status_code == 401:
             # Our own service creds are invalid — config error, not user-token issue
             logger.error(
-                "Introspect call rejected with 401 — Relay's own HB service "
-                "credentials are invalid. Check RELAY_HEARTBEAT_API_KEY/_SECRET.",
+                "Introspect call rejected with 401 — Relay's own HB s2s "
+                "credentials are invalid. Check RELAY_HEARTBEAT_API_KEY + "
+                "RELAY_S2S_SIGNING_KEY (and confirm Relay's clock is NTP-"
+                "synced; skew >300s causes HMAC_TIMESTAMP_SKEW 401).",
                 extra={"trace_id": trace_id},
             )
             raise HeartBeatUnavailableError(
-                message="Relay service credentials rejected by HeartBeat",
+                message="Relay s2s credentials rejected by HeartBeat",
             )
 
         if resp.status_code >= 500 or resp.status_code == 502 or resp.status_code == 504:
