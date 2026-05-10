@@ -36,6 +36,13 @@ Currently tracked counters (CSSV1 R9 + future R-chips):
   ``error_code="BEARER_S2S_REMOVED"``. Any non-zero rate after Phase 0
   catchup means a code path is still sending the dead Bearer s2s
   form; ops alarms.
+- ``relay_introspect_cache_total{result}`` — incremented on every
+  call to :meth:`IntrospectClient.introspect`. ``result`` is one of
+  ``hit`` (served from cache), ``miss`` (cache empty/expired, called
+  HB), ``bypass`` (caller passed ``X-Bypass-Auth-Cache: true``), or
+  ``no_jti`` (token had no ``jti`` claim, can't cache — fell through
+  to HB). Used to size HB's introspect QPS reduction (CSSV1 S1
+  chip 2/2).
 - ``relay_amqp_publish_total{routing_key,result}`` — placeholder for
   CSSV1 R2 (state-only AMQP producer).
 - ``relay_lock_acquire_duration_seconds`` — placeholder for CSSV1 R8.
@@ -67,6 +74,13 @@ COUNTER_HELP: Dict[str, Tuple[str, str]] = {
     "relay_bearer_removed_received_total": (
         "Count of HB responses with 401 BEARER_S2S_REMOVED received by Relay. "
         "Non-zero rate = a Relay code path is still sending Bearer s2s.",
+        "counter",
+    ),
+    "relay_introspect_cache_total": (
+        "Count of IntrospectClient.introspect() calls labelled by cache "
+        "outcome: hit (served from cache), miss (called HB then cached), "
+        "bypass (X-Bypass-Auth-Cache:true skipped cache), or no_jti "
+        "(token lacked jti claim, fell through to HB).",
         "counter",
     ),
     "relay_amqp_publish_total": (
