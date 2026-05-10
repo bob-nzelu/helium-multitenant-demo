@@ -418,3 +418,146 @@ class TestDispatcherHeaderShapeBranching:
 
         with pytest.raises(JWTRejectedError):
             await authenticate_request(req)
+
+
+# ── X-Bypass-Auth-Cache header plumbing (CSSV1 S1 chip 2/2) ──────────────
+
+
+def _success_introspect_mock() -> AsyncMock:
+    """Build an ``introspect_client`` mock that returns an active result."""
+    introspect = AsyncMock()
+    introspect.introspect.return_value = SimpleNamespace(
+        active=True,
+        actor_type="user",
+        user_id="u-1",
+        role=None,
+        permissions=[],
+        tenant_id="t-1",
+        device_id=None,
+        last_auth_at=None,
+        expires_at=None,
+        session_expires_at=None,
+        step_up_satisfied=None,
+        error_code=None,
+        message=None,
+    )
+    return introspect
+
+
+class TestDispatcherBypassCacheHeader:
+    """``X-Bypass-Auth-Cache: true`` (case-insensitive) → ``bypass_cache=True``."""
+
+    @pytest.mark.asyncio
+    async def test_header_absent_means_no_bypass(self):
+        introspect = _success_introspect_mock()
+        app_state = _make_app_state(introspect_client=introspect)
+        req = _make_request(
+            headers={"Authorization": "Bearer eyJ.eyJ.SIG"},
+            app_state=app_state,
+        )
+
+        await authenticate_request(req)
+
+        introspect.introspect.assert_called_once()
+        assert introspect.introspect.call_args.kwargs["bypass_cache"] is False
+
+    @pytest.mark.asyncio
+    async def test_header_true_lowercase_means_bypass(self):
+        introspect = _success_introspect_mock()
+        app_state = _make_app_state(introspect_client=introspect)
+        req = _make_request(
+            headers={
+                "Authorization": "Bearer eyJ.eyJ.SIG",
+                "X-Bypass-Auth-Cache": "true",
+            },
+            app_state=app_state,
+        )
+
+        await authenticate_request(req)
+        assert introspect.introspect.call_args.kwargs["bypass_cache"] is True
+
+    @pytest.mark.asyncio
+    async def test_header_true_uppercase_means_bypass(self):
+        """Header value comparison is case-insensitive per the brief."""
+        introspect = _success_introspect_mock()
+        app_state = _make_app_state(introspect_client=introspect)
+        req = _make_request(
+            headers={
+                "Authorization": "Bearer eyJ.eyJ.SIG",
+                "X-Bypass-Auth-Cache": "TRUE",
+            },
+            app_state=app_state,
+        )
+
+        await authenticate_request(req)
+        assert introspect.introspect.call_args.kwargs["bypass_cache"] is True
+
+    @pytest.mark.asyncio
+    async def test_header_false_means_no_bypass(self):
+        """Anything that isn't ``"true"`` (case-insensitive) caches normally."""
+        introspect = _success_introspect_mock()
+        app_state = _make_app_state(introspect_client=introspect)
+        req = _make_request(
+            headers={
+                "Authorization": "Bearer eyJ.eyJ.SIG",
+                "X-Bypass-Auth-Cache": "false",
+            },
+            app_state=app_state,
+        )
+
+        await authenticate_request(req)
+        assert introspect.introspect.call_args.kwargs["bypass_cache"] is False
+
+    @pytest.mark.asyncio
+    async def test_header_garbage_means_no_bypass(self):
+        introspect = _success_introspect_mock()
+        app_state = _make_app_state(introspect_client=introspect)
+        req = _make_request(
+            headers={
+                "Authorization": "Bearer eyJ.eyJ.SIG",
+                "X-Bypass-Auth-Cache": "yes-please",
+            },
+            app_state=app_state,
+        )
+
+        await authenticate_request(req)
+        assert introspect.introspect.call_args.kwargs["bypass_cache"] is False
+
+    @pytest.mark.asyncio
+    async def test_bypass_header_ignored_on_hmac_path(self):
+        """The bypass header only affects the JWT-introspect call.
+
+        ERP HMAC requests don't have an introspect cache to bypass, so
+        the header is benign on that path. Pin behaviour: dispatcher
+        still routes to ``_verify_hmac`` and never touches the
+        introspect client.
+        """
+        api_key = "test-key-001"
+        secret = "secret-for-test-key-001"
+        body = b""
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sig = compute_signature(api_key, ts, body, secret)
+
+        introspect = AsyncMock()
+        introspect.introspect.side_effect = AssertionError(
+            "dispatcher should not call introspect on the HMAC path"
+        )
+        app_state = _make_app_state(
+            api_key_secrets={api_key: secret},
+            introspect_client=introspect,
+        )
+        req = _make_request(
+            headers={
+                "X-API-Key": api_key,
+                "X-Timestamp": ts,
+                "X-Signature": sig,
+                "X-Bypass-Auth-Cache": "true",
+            },
+            raw_body=body,
+            app_state=app_state,
+        )
+
+        ctx = await authenticate_request(req)
+        assert ctx.actor_type == "erp"
+        introspect.introspect.assert_not_called()

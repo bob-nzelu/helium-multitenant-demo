@@ -171,12 +171,19 @@ async def _verify_service_creds(
 async def _verify_user_jwt(
     request: Request,
     jwt_token: str,
+    bypass_cache: bool = False,
 ) -> CallerContext:
     """
     User JWT path (§3.1) — introspect against HeartBeat.
 
     Never validates locally (§5.1). If HeartBeat is unreachable, raises
     AuthUpstreamUnavailableError → 502 (fail closed per §2.4).
+
+    ``bypass_cache`` is plumbed from the ``X-Bypass-Auth-Cache: true``
+    request header by :func:`authenticate_request` (CSSV1 S1 chip 2/2).
+    The header is a hatch for callers who need fresh state on a
+    sensitive operation (e.g., post-step-up flow) — not a general
+    permission boundary.
     """
     introspect_client = getattr(request.app.state, "introspect_client", None)
     if introspect_client is None:
@@ -189,6 +196,7 @@ async def _verify_user_jwt(
         result = await introspect_client.introspect(
             jwt_token=jwt_token,
             trace_id=trace_id,
+            bypass_cache=bypass_cache,
         )
     except HeartBeatUnavailableError as e:
         raise AuthUpstreamUnavailableError(str(e)) from e
@@ -249,8 +257,14 @@ async def authenticate_request(request: Request) -> CallerContext:
         if ":" in token and "." not in token and len(token.split(":")) == 2:
             api_key, api_secret = token.split(":", 1)
             return await _verify_service_creds(request, api_key, api_secret)
-        # JWT otherwise (compact JWS has two dots)
-        return await _verify_user_jwt(request, token)
+        # JWT otherwise (compact JWS has two dots).
+        # CSSV1 S1 chip 2/2 — ``X-Bypass-Auth-Cache: true`` (case-insensitive)
+        # forces the introspect call to skip the per-jti cache. Any other
+        # value (absent, "false", anything else) means cache normally.
+        bypass_cache = (
+            headers.get("x-bypass-auth-cache", "").strip().lower() == "true"
+        )
+        return await _verify_user_jwt(request, token, bypass_cache=bypass_cache)
 
     # Nothing recognisable
     logger.info(
