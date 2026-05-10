@@ -289,3 +289,111 @@ class TestRedisClientMultiCompany:
         assert "company-A" in keys_used[0]
         assert "company-B" in keys_used[1]
         assert keys_used[0] != keys_used[1]
+
+
+# ── CSSV1 S7 (R5) Duplicate Lookup ───────────────────────────────────────
+
+
+class TestRedisClientCheckDuplicate:
+    """RedisClient.check_duplicate — primary tier of /api/duplicate/lookup."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_disabled(self):
+        """No URL configured → not available → None (route falls back to HB)."""
+        client = RedisClient(redis_url="")
+        result = await client.check_duplicate(
+            tenant_id="tenant-a", file_hash="a" * 64
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_cached_dict_on_hit(self):
+        """Redis returns cached side-response — JSON-decoded into dict."""
+        client = RedisClient(redis_url="redis://stub")
+        client._redis = AsyncMock()
+        client._available = True
+        cached_payload = {
+            "is_duplicate": True,
+            "matched_batch_display_id": "BATCH-1",
+            "basis": "file_hash",
+        }
+        import json as _json
+        client._redis.get = AsyncMock(return_value=_json.dumps(cached_payload))
+
+        result = await client.check_duplicate(
+            tenant_id="tenant-a", file_hash="b" * 64
+        )
+
+        assert result == cached_payload
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_miss(self):
+        """Key not present → None (caller falls back to HB)."""
+        client = RedisClient(redis_url="redis://stub")
+        client._redis = AsyncMock()
+        client._available = True
+        client._redis.get = AsyncMock(return_value=None)
+
+        result = await client.check_duplicate(
+            tenant_id="tenant-a", file_hash="c" * 64
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_redis_exception_flips_available_off_returns_none(self):
+        """Redis exception → mark unavailable + return None. Subsequent
+        calls in the same request short-circuit through the disabled
+        branch instead of re-raising."""
+        client = RedisClient(redis_url="redis://stub")
+        client._redis = AsyncMock()
+        client._available = True
+        client._redis.get = AsyncMock(side_effect=ConnectionError("Redis down"))
+
+        result = await client.check_duplicate(
+            tenant_id="tenant-a", file_hash="d" * 64
+        )
+
+        assert result is None
+        assert client.is_available is False
+
+    @pytest.mark.asyncio
+    async def test_corrupt_cache_entry_returns_none_does_not_disable(self):
+        """A bad JSON entry is treated as a miss; Redis itself stays up."""
+        client = RedisClient(redis_url="redis://stub")
+        client._redis = AsyncMock()
+        client._available = True
+        client._redis.get = AsyncMock(return_value="not-valid-json{")
+
+        result = await client.check_duplicate(
+            tenant_id="tenant-a", file_hash="e" * 64
+        )
+
+        assert result is None
+        # Redis itself is fine; only this entry is bad.
+        assert client.is_available is True
+
+    @pytest.mark.asyncio
+    async def test_key_includes_tenant_and_hash(self):
+        """Tenant id is the cross-tenant guard at the cache layer —
+        wrong-tenant probe gets a different key, hence 'not present'."""
+        client = RedisClient(redis_url="redis://stub", prefix="relay")
+        client._redis = AsyncMock()
+        client._available = True
+
+        keys_seen = []
+
+        async def capture_get(key):
+            keys_seen.append(key)
+            return None
+
+        client._redis.get = capture_get
+
+        await client.check_duplicate(tenant_id="tenant-a", file_hash="f" * 64)
+        await client.check_duplicate(tenant_id="tenant-b", file_hash="f" * 64)
+
+        assert len(keys_seen) == 2
+        assert keys_seen[0] != keys_seen[1]
+        assert "tenant-a" in keys_seen[0]
+        assert "tenant-b" in keys_seen[1]
+        assert "f" * 64 in keys_seen[0]

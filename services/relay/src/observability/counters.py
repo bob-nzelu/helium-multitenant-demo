@@ -48,6 +48,9 @@ Currently tracked counters (CSSV1 R9 + future R-chips):
 - ``relay_lock_acquire_duration_seconds`` — placeholder for CSSV1 R8.
 - ``relay_status_orchestration_duration_seconds`` — placeholder for
   CSSV1 R4.
+- ``relay_duplicate_lookup_total{result}`` — CSSV1 R5 lookup outcome.
+- ``relay_cross_tenant_denied_total{endpoint}`` — CSSV1 R10 cross-tenant
+  attempts blocked by ``tenant_guard``.
 
 The placeholders are listed in :data:`COUNTER_HELP` so the exposition
 is forward-compatible; their ``inc()`` callsites land in the chips
@@ -94,6 +97,20 @@ COUNTER_HELP: Dict[str, Tuple[str, str]] = {
     "relay_status_orchestration_duration_seconds": (
         "Histogram of Relay /api/status orchestration durations (placeholder).",
         "counter",  # placeholder counter; flips to histogram in CSSV1 R4
+    ),
+    # CSSV1 S7 (R5) — POST /api/duplicate/lookup outcome counter.
+    # Labels: result = hit_redis | hit_hb_fallback | miss | redis_down | both_down.
+    # Tenant id is intentionally NOT a label (high cardinality).
+    "relay_duplicate_lookup_total": (
+        "Count of POST /api/duplicate/lookup outcomes labeled by tier + result.",
+        "counter",
+    ),
+    # CSSV1 S7 (R10) — cross-tenant attempt counter, fired by tenant_guard.
+    # Per HB CLAUDE.md "Tenant Isolation — Default Deny": non-zero rate signals
+    # abuse or a buggy caller; ops alarms.
+    "relay_cross_tenant_denied_total": (
+        "Count of cross-tenant access attempts blocked by tenant_guard, labeled by endpoint.",
+        "counter",
     ),
 }
 
