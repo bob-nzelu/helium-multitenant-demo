@@ -300,6 +300,33 @@ class InternalError(RelayError):
         self.original_error = original_error
 
 
+# ── Configuration Error (process-bail at startup) ─────────────────────────
+
+
+class ConfigError(RelayError):
+    """
+    Raised at startup when Relay's configuration is invalid in a way that
+    cannot be safely degraded. Examples:
+
+    - ``RELAY_S2S_SIGNING_KEY`` is not 64 lowercase-hex chars (CSSV1 R9.1)
+    - System clock skew vs HeartBeat exceeds the safe margin (CSSV1 R9.2)
+    - A required env var is missing on a code path that cannot tolerate
+      the empty default
+
+    These should NEVER surface to a request handler. They abort the
+    lifespan startup so the container fails fast and the orchestrator
+    surfaces the misconfiguration in deploy logs rather than mystery
+    401s mid-flight.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(
+            error_code="CONFIG_ERROR",
+            message=message,
+            status_code=500,  # never returned to a client; bails at startup
+        )
+
+
 # ── Transient Errors (500, retryable) ─────────────────────────────────────
 
 

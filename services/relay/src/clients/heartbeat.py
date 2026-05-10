@@ -56,8 +56,15 @@ from ..errors import (
     JWTRejectedError,
     TransientError,
 )
+from ..observability import counters
 
 logger = logging.getLogger(__name__)
+
+
+# CSSV1 R9.3 — alarm signal. If HB ever returns this code from a Relay
+# call, a Relay code path is still sending the dead Bearer s2s form.
+# Rate >0 after Phase 0 catchup (2026-05-09) is a regression.
+_BEARER_REMOVED_CODE = "BEARER_S2S_REMOVED"
 
 
 class HeartBeatClient(BaseClient):
@@ -199,6 +206,7 @@ class HeartBeatClient(BaseClient):
             return
 
         if resp.status_code == 401:
+            self._check_bearer_removed_alarm(resp, context)
             raise JWTRejectedError(
                 message=f"HeartBeat rejected JWT on {context}: {resp.text}"
             )
@@ -212,6 +220,47 @@ class HeartBeatClient(BaseClient):
         # 4xx other than 401 — permanent error, wrap as HeartBeatUnavailable
         raise HeartBeatUnavailableError(
             message=f"HeartBeat {context} failed ({resp.status_code}): {resp.text}"
+        )
+
+    def _check_bearer_removed_alarm(
+        self, resp: httpx.Response, context: str
+    ) -> None:
+        """Per CSSV1 R9.3 — fire the alarm if HB returns BEARER_S2S_REMOVED.
+
+        HB returns ``401`` with JSON ``{"error_code": "BEARER_S2S_REMOVED"}``
+        when the caller is still sending the dead ``Authorization: Bearer
+        api_key:api_secret`` form. Post-Phase-0 (2026-05-09) Relay should
+        NEVER trigger this — every Relay→HB call goes through
+        :func:`_s2s_headers`. A non-zero rate on
+        ``relay_bearer_removed_received_total`` means a code path slipped
+        back onto the legacy form; ops alarms.
+
+        ERROR-level log + counter increment. Doesn't change the raised
+        exception (still :class:`JWTRejectedError`) — this is purely a
+        side-channel signal.
+        """
+        try:
+            body = resp.json()
+        except Exception:
+            return  # not JSON — definitely not the signed BEARER_S2S_REMOVED shape
+        if not isinstance(body, dict):
+            return
+        if body.get("error_code") != _BEARER_REMOVED_CODE:
+            return
+
+        counters.inc(
+            "relay_bearer_removed_received_total",
+            labels={"endpoint": context},
+        )
+        logger.error(
+            "BEARER_S2S_REMOVED received from HeartBeat — Relay sent the "
+            "dead Bearer s2s form on %s. This is a regression: every "
+            "Relay→HB call should go through build_s2s_hmac_headers(). "
+            "Find the offending caller in the trace and migrate it. "
+            "(Rate alarm: relay_bearer_removed_received_total{endpoint=%r}.)",
+            context,
+            context,
+            extra={"trace_id": self.trace_id},
         )
 
     # ── Blob Storage ───────────────────────────────────────────────────────
