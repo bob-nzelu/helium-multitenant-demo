@@ -26,6 +26,10 @@ from ..core.irn import IRNGenerator
 from ..core.module_cache import TransformaModuleCache
 from ..core.qr import QRGenerator
 from ..errors import RelayError
+from ..observability.startup_checks import (
+    check_clock_skew_against_heartbeat,
+    validate_signing_key_shape,
+)
 from ..services.bulk import BulkService
 from ..services.external import ExternalService
 from ..services.ingestion import IngestionService
@@ -84,6 +88,13 @@ def create_app(
         """Startup: load module cache. Shutdown: cleanup."""
         # ── Startup ──────────────────────────────────────────────────
         logger.info(f"Relay-API starting — {config.instance_id}:{config.port}")
+
+        # CSSV1 R9.1 + R9.2 — defensive startup checks before any HB
+        # call. Bail loudly on a malformed signing key (R9.1) or a
+        # major clock skew (R9.2); soft-warn on degraded dev mode +
+        # transient HB unreachability.
+        validate_signing_key_shape(config.heartbeat_s2s_signing_key)
+        await check_clock_skew_against_heartbeat(config.heartbeat_api_url)
 
         # Clients — HMAC s2s post-cutover 2026-05-08 (HMAC_S2S_MIGRATION_SPEC).
         # The signing key comes from RELAY_S2S_SIGNING_KEY (config field

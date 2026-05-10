@@ -37,8 +37,15 @@ from ..errors import (
     HeartBeatUnavailableError,
     JWTRejectedError,
 )
+from ..observability import counters
 
 logger = logging.getLogger(__name__)
+
+
+# CSSV1 R9.3 — see ``clients.heartbeat`` for full rationale. Mirrors the
+# alarm path on the introspect-only HTTP transport (which doesn't share
+# ``HeartBeatClient._raise_for_status``).
+_BEARER_REMOVED_CODE = "BEARER_S2S_REMOVED"
 
 
 @dataclass
@@ -200,6 +207,26 @@ class IntrospectClient:
 
         # Auth-upstream protocol errors: spec §2.4 — fail closed to 502
         if resp.status_code == 401:
+            # CSSV1 R9.3 — alarm if HB returned the BEARER_S2S_REMOVED code.
+            # Means the introspect call shipped Bearer api_key:api_secret
+            # somehow (header builder regression / config drift).
+            try:
+                body = resp.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict) and body.get("error_code") == _BEARER_REMOVED_CODE:
+                counters.inc(
+                    "relay_bearer_removed_received_total",
+                    labels={"endpoint": "introspect"},
+                )
+                logger.error(
+                    "BEARER_S2S_REMOVED received on introspect — Relay sent "
+                    "the dead Bearer s2s form. This is a regression: every "
+                    "introspect call should go through "
+                    "build_s2s_hmac_headers(). (Rate alarm: "
+                    "relay_bearer_removed_received_total{endpoint=\"introspect\"}.)",
+                    extra={"trace_id": trace_id},
+                )
             # Our own service creds are invalid — config error, not user-token issue
             logger.error(
                 "Introspect call rejected with 401 — Relay's own HB s2s "
