@@ -183,6 +183,22 @@ class TestHeartBeatBearerRemovedAlarm:
 # ── IntrospectClient path ────────────────────────────────────────────────
 
 
+def _filter_bearer_alarm_rows(snapshot):
+    """Strip introspect-cache bookkeeping rows from a counters snapshot.
+
+    The IntrospectClient also increments ``relay_introspect_cache_total``
+    (per CSSV1 S1 chip 2/2, PR #18) on every call — including a ``no_jti``
+    branch hit by these tests' synthetic ``eyJ.eyJ.SIG`` tokens. That
+    counter is orthogonal to the bearer_removed alarm under test; filter
+    it out so the assertions stay focused on alarm behaviour rather than
+    incidental cache-counter rows.
+    """
+    return [
+        row for row in snapshot
+        if row[0] != "relay_introspect_cache_total"
+    ]
+
+
 class TestIntrospectBearerRemovedAlarm:
 
     @respx.mock
@@ -205,7 +221,9 @@ class TestIntrospectBearerRemovedAlarm:
             await client.introspect("eyJ.eyJ.SIG", trace_id="t")
         await client.close()
 
-        out = list(counters.get_all())
+        # Filter out the introspect-cache bookkeeping rows (PR #18) so
+        # the assertion pins the alarm behaviour only.
+        out = _filter_bearer_alarm_rows(list(counters.get_all()))
         assert out == [
             (
                 "relay_bearer_removed_received_total",
@@ -235,4 +253,4 @@ class TestIntrospectBearerRemovedAlarm:
             await client.introspect("eyJ.eyJ.SIG")
         await client.close()
 
-        assert list(counters.get_all()) == []
+        assert _filter_bearer_alarm_rows(list(counters.get_all())) == []
