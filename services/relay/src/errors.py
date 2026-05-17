@@ -17,6 +17,7 @@ Hierarchy:
     │   ├── SignatureVerificationFailedError
     │   ├── TimestampExpiredError
     │   └── JWTRejectedError
+    ├── WebhookAuthError (403/503 — CSSV1 S4 R12)
     ├── RateLimitExceededError (429)
     ├── QueueNotFoundError (404)
     ├── DuplicateFileError (409)
@@ -225,6 +226,40 @@ class AuthUpstreamUnavailableError(RelayError):
             error_code="AUTH_UPSTREAM_UNAVAILABLE",
             message=message,
             status_code=502,
+        )
+
+
+# ── Webhook Auth (CSSV1 S4 R12) ──────────────────────────────────────────
+
+
+class WebhookAuthError(RelayError):
+    """
+    Inbound webhook rejected by the signed-transport verifier.
+
+    Per ``WEBHOOK_CONFIG_CONTRACT.md §5.4`` the consumer returns one of
+    six error codes (six 403s + one 503). All carry the same generic
+    body — operators read the ``error_code`` field to diagnose without
+    leaking implementation details to attackers.
+
+    Codes (status / error_code):
+        - 503 / ``WEBHOOK_NOT_CONFIGURED``  — signing key env var unset
+        - 403 / ``WEBHOOK_IP_REJECTED``     — source IP outside allow-list
+        - 403 / ``WEBHOOK_SIG_MISSING``     — header absent / wrong prefix
+        - 403 / ``WEBHOOK_SIG_BAD_TIMESTAMP`` — header missing or non-integer
+        - 403 / ``WEBHOOK_SIG_REPLAY``      — timestamp outside replay window
+        - 403 / ``WEBHOOK_SIG_INVALID``     — HMAC mismatch
+    """
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        status_code: int = 403,
+    ):
+        super().__init__(
+            error_code=error_code,
+            message=message,
+            status_code=status_code,
         )
 
 

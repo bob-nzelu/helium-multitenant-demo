@@ -73,6 +73,23 @@ class RelayConfig:
     module_cache_refresh_interval_s: int = 43200  # 12 hours
     internal_service_token: str = ""              # For /internal/ auth from HeartBeat
 
+    # ── Webhook receiver (CSSV1 S4 R12) ───────────────────────────────────
+    # Signed-transport config per
+    # ``helium-services-phase3/HeartBeat/Documentation/WEBHOOK_CONFIG_CONTRACT.md``.
+    # Operator pulls ``webhook_signing_key`` from HB's startup WARNING log
+    # (HB mints one per service on first boot — see contract §6.3) and
+    # pastes it into ``RELAY_WEBHOOK_SIGNING_KEY``. Until that env var is
+    # set, the receiver rejects every webhook with 503
+    # ``WEBHOOK_NOT_CONFIGURED`` (fail-loud-and-safe per §6.2).
+    webhook_signing_key: str = ""
+    # Comma-separated CIDR allow-list for inbound webhook source IPs.
+    # Default mirrors the contract's §5.1 baseline: Docker private nets
+    # + loopback. Override with ``RELAY_WEBHOOK_ALLOWED_CIDRS`` for
+    # bare-metal / cross-host deployments.
+    webhook_allowed_cidrs: str = "172.16.0.0/12,10.0.0.0/8,127.0.0.1/32"
+    # Replay-protection window. Contract §5.3 locks 300 seconds.
+    webhook_replay_window_s: int = 300
+
     # ── Redis (rate limiting) ───────────────────────────────────────────
     redis_url: str = ""                 # Empty = disabled (graceful degradation)
     redis_prefix: str = "relay"
@@ -193,6 +210,14 @@ class RelayConfig:
             kwargs["module_cache_refresh_interval_s"] = int(v)
         if v := env("INTERNAL_SERVICE_TOKEN"):
             kwargs["internal_service_token"] = v
+
+        # ── Webhook receiver (CSSV1 S4 R12)
+        if v := env("WEBHOOK_SIGNING_KEY"):
+            kwargs["webhook_signing_key"] = v
+        if v := env("WEBHOOK_ALLOWED_CIDRS"):
+            kwargs["webhook_allowed_cidrs"] = v
+        if v := env("WEBHOOK_REPLAY_WINDOW_S"):
+            kwargs["webhook_replay_window_s"] = int(v)
 
         # ── Redis
         if v := env("REDIS_URL"):

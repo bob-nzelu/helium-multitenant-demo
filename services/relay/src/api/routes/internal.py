@@ -2,9 +2,16 @@
 Internal endpoints — HeartBeat pushes config/cache updates.
 
 POST /internal/refresh-cache         — Legacy: Transforma module refresh
-POST /api/v1/webhook/config_changed  — Standard webhook: any config change
+POST /api/v1/webhook/config_changed  — Canonical signed webhook (CSSV1 R12)
 
-Both protected by service bearer token. Not exposed via tunnel.
+The canonical receiver enforces the full ``WEBHOOK_CONFIG_CONTRACT.md``
+discipline: IP allow-list + ``X-HeartBeat-Signature`` HMAC + 5-minute
+replay window. The legacy ``/internal/refresh-cache`` stays on the
+simpler ``verify_internal_token`` Bearer scheme for back-compat —
+producers that haven't migrated to the signed scheme still work. New
+producers MUST target ``/api/v1/webhook/config_changed``.
+
+Not exposed via tunnel.
 """
 
 import logging
@@ -15,6 +22,7 @@ from pydantic import BaseModel
 
 from ..deps import verify_internal_token
 from ..models import RefreshCacheResponse
+from ..webhook_auth import verify_webhook_request
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +48,32 @@ class ConfigChangedResponse(BaseModel):
 @router.post(
     "/api/v1/webhook/config_changed",
     response_model=ConfigChangedResponse,
-    summary="Config change webhook (standard pattern)",
-    dependencies=[Depends(verify_internal_token)],
+    summary="Config change webhook (signed transport per WEBHOOK_CONFIG_CONTRACT.md)",
+    dependencies=[Depends(verify_webhook_request)],
 )
 async def webhook_config_changed(
     payload: ConfigChangedPayload,
     request: Request,
 ):
     """
-    Standard webhook receiver per WEBHOOK_CONFIG_CONTRACT.md.
+    Canonical signed webhook receiver — CSSV1 S4 R12.
 
-    HeartBeat calls this when config.db changes. The `changed` list
+    HeartBeat producer signs every webhook with the per-service key from
+    ``registry.service_config`` (per ``WEBHOOK_CONFIG_CONTRACT.md §6``).
+    Relay verifies via ``verify_webhook_request``:
+
+        1. ``RELAY_WEBHOOK_SIGNING_KEY`` env var set
+           (503 ``WEBHOOK_NOT_CONFIGURED`` otherwise — fail-loud-and-safe)
+        2. Source IP in ``RELAY_WEBHOOK_ALLOWED_CIDRS``
+           (default: Docker private + loopback)
+        3. ``X-HeartBeat-Signature: sha256=<hex>`` present
+        4. ``X-HeartBeat-Timestamp`` (Unix epoch seconds) present + parseable
+        5. Timestamp inside ±300 s replay window
+        6. HMAC over ``f"{timestamp}.".encode() + body_bytes`` matches
+
+    Six failure codes per contract §5.4 — see ``WebhookAuthError``.
+
+    HeartBeat calls this when ``config.db`` changes. The ``changed`` list
     tells Relay WHAT changed so it can selectively refresh.
 
     Changed categories Relay cares about:
