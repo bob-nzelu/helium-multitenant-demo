@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from ..caller_context import CallerContext
 from ..deps import authenticate_request, decrypt_body_if_needed
 from ..models import IngestResponse
+from ..version_drift import version_drift_guard
 from ...services.bulk import BulkService
 from ...services.external import ExternalService
 
@@ -40,11 +41,15 @@ router = APIRouter()
     "/api/ingest",
     response_model=IngestResponse,
     summary="Ingest files for processing",
+    # §B-Drift gateway: reject stale version axes with 409 version_drift BEFORE
+    # the handler runs (no forwarding, no backend side effects). Route-level
+    # dependency so the guard cannot be bypassed by the handler signature.
+    dependencies=[Depends(version_drift_guard)],
     responses={
         400: {"description": "Validation failed / Malware detected"},
         401: {"description": "Authentication failed"},
         403: {"description": "Encryption required"},
-        409: {"description": "Duplicate file"},
+        409: {"description": "Duplicate file / version drift"},
         429: {"description": "Rate limit exceeded"},
         503: {"description": "Module not loaded (external flow)"},
     },

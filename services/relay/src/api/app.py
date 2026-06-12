@@ -34,6 +34,7 @@ from ..services.bulk import BulkService
 from ..services.external import ExternalService
 from ..services.ingestion import IngestionService
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
+from .version_drift import VersionDriftError, version_drift_error_handler
 from .routes.health import router as health_router
 from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
@@ -200,6 +201,9 @@ def create_app(
 
     # Error handlers
     app.add_exception_handler(RelayError, relay_error_handler)
+    # §B-Drift: version_drift 409 rendered with the exact contract body
+    # (no RelayError envelope) — see src/api/version_drift.py.
+    app.add_exception_handler(VersionDriftError, version_drift_error_handler)
 
     # Routes
     app.include_router(health_router)
