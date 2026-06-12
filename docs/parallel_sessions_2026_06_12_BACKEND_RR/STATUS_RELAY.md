@@ -228,3 +228,27 @@ R-M2 builds the emission behind a `LifecyclePublisher` seam so the arbitrated si
   - **§2.1 RECALIBRATED (binding):** contract docs bind; **SBS is mock, never authoritative where it invents** (no `X-SBS-*`, no colon headers).
   - **R-M2/R-M3/R-M4 in flight** (3 parallel worktrees `…-rm2/-rm3/-rm4` off `main@889bfa7`): R-M2 **aligned** (no change); **R-M3 + R-M4 need the canon correction applied post-completion** (X-Helium-* five-axis; X-Relay-Artifact-* + kind enum) — no live-message channel to running agents, so deterministic follow-up edits in their worktrees.
   - **Deferred:** Q21 hygiene block is **post-Monday** → demo **#10 close deferred** (ratified, queued, not now). Debt-map cutover DELTA rows to add. Full ARCH report to follow once the 3 chips land + are reconciled.
+
+---
+
+## SESSION REPORT — 2026-06-12 (RELAY → ARCH)
+
+**Landed (merge chain + R-M2):**
+- **Merge chain COMPLETE:** #21 (`889bfa7`) + #20 (`a28c703`) squash-merged; **#23** (R7+recdup) open+green; **#22** R12 frozen draft (L5).
+- **R-M2 DONE → PR #24 (MERGEABLE + CLEAN).** §B-Submit taxonomy: `metadata.finalize` on `/api/ingest`, NEW `POST /api/finalize {ref,trace_id}` (ref-only, 202, `trace_id` echo, 409 `ALREADY_FINALIZED`=idempotent, missing-ref 400, ref-dedup), `LifecyclePublisher` seam → Core over HTTP (ruling **c** + **Q15** two-stream: Relay hosts no SSE). Agent-drafted; I fixed its finalize `trace_id`-fallback bug (was masking 400 + breaking ref-dedup), merged `main` in (resolved the `app.py` router-mount conflict by keeping both finalize+duplicate), **67/67 green** (R-M2 + #20 suites) and full suite **589 pass / 7 pre-existing fail**.
+
+**WIP preserved — R-M3 + R-M4 (sub-agents CUT by session limit ~22:00 WAT, before test/PR):**
+- **R-M3** `feat/relay-cssv1-rm3-version-drift` @ `68c4243` (untested WIP on origin): `version_drift` guard. **Finish = correct map to `X-Helium-*` FIVE axes (usage_state ON, Q17) + test + merge-main + PR.**
+- **R-M4** `feat/relay-cssv1-rm4-artifact-fetch` @ `47ccedc` (untested WIP on origin): `POST /api/artifacts/fetch`. **Finish = response headers `X-Relay-Artifact-*` (not `X-SBS-*`) + propose closed kind enum (default `qr_invoice`) + test + merge-main + PR.**
+- Both will hit the same additive `app.py` router-mount conflict — resolve by keeping all mounts (pattern set by #24).
+
+**Recommended merge order:** #23 → #24 (R-M2) → R-M3 → R-M4, each merged-on-main before vet (app.py conflicts are mechanical, keep-all-mounts).
+
+**Cross-seat NEEDS (consolidated):**
+- **CORE:** (R-M2) accept finalize trigger (`CoreClient.finalize_by_reference`/`publish_lifecycle_event` are HTTP stubs) + emit `core.artifact.hlx_available` + `core.submission.terminal` echoing `trace_id`; (R-M4) HLX/lifecycle artifact-ref shape.
+- **HB:** (#20) `security.cross_tenant_denied` dual-fire (Monday-blocking); (R-M3) the 5 `X-Helium-*` axis header names + authoritative-value feed (HB-S3/S4 fabric); (R-M4) D6 `ARTIFACT_ENDPOINTS_CONTRACT` + blob-fetch-by-ref for Relay creds.
+
+**For ARCH to capture/fan out:**
+- **BOB MENTAL-MODEL ALIGNMENT (pending Bob's confirm):** the canonical Relay frontend API surface = ingest(passive) · finalize-with-upload · finalize-by-ref · update-payment · approve · reject · reset · **restart** · nudge(+approver) · withdraw · **reverse (Credit Note) + reversal-approval sub-flow** · **artifact-fetch (`POST /api/artifacts/fetch`)**; + **deferred Inbound family (L13)**; all under the version-drift 409 guard; JWT/HMAC auth; status inline + Core-SSE. Bob's additions to surface: **Reverse** + **Artifact-fetch** were not in his initial list (both touch Core/Scout). Ingest#1 IRN/QR are **provisional** (FIRS push only at finalize). Update-Payment exists on outbound **and** inbound sides.
+- **FLAG (minor doc inconsistency):** STATUS_ARCH "Needs from seats → RELAY" line still reads "Q17 axis set = documented four" — superseded by its own round-3 "Q17 RATIFIED FIVE". I built to five.
+- **Deferred:** #10 close (Q21 post-Monday); debt-map cutover-DELTA rows (`X-SBS-*`→`X-Relay-Artifact-*`, colon→`X-Helium-*`).
