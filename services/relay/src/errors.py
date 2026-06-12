@@ -17,6 +17,7 @@ Hierarchy:
     │   ├── SignatureVerificationFailedError
     │   ├── TimestampExpiredError
     │   └── JWTRejectedError
+    ├── CrossTenantDeniedError (403)
     ├── RateLimitExceededError (429)
     ├── QueueNotFoundError (404)
     ├── DuplicateFileError (409)
@@ -226,6 +227,39 @@ class AuthUpstreamUnavailableError(RelayError):
             message=message,
             status_code=502,
         )
+
+
+class CrossTenantDeniedError(RelayError):
+    """
+    Caller from tenant A attempted to read/write a tenant B resource.
+
+    Per HeartBeat ``CLAUDE.md`` "Tenant Isolation — Default Deny" — every
+    cross-tenant attempt is 403 + a Prometheus counter + an HB audit
+    event with ``event_type="security.cross_tenant_denied"``. HB's audit
+    writer fans out to ``security_events`` per its own dual-fire rule.
+    Not 404; not a silent skip — make abuse visible.
+
+    Response body intentionally does NOT echo ``caller_tenant`` /
+    ``requested_tenant`` — those would leak tenant existence to a
+    cross-tenant probe. Both ids are kept on the exception object for
+    audit + counter wiring only.
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        caller_tenant: str,
+        requested_tenant: str,
+    ):
+        super().__init__(
+            error_code="CROSS_TENANT_DENIED",
+            message="Access denied — resource is not in your tenant.",
+            details=[{"endpoint": endpoint}],
+            status_code=403,
+        )
+        self.endpoint = endpoint
+        self.caller_tenant = caller_tenant
+        self.requested_tenant = requested_tenant
 
 
 # ── Rate Limit (429) ──────────────────────────────────────────────────────

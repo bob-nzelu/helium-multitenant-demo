@@ -1,20 +1,32 @@
 """
-Redis Client for Rate Limiting
+Redis Client for Rate Limiting + CSSV1 R5 Duplicate Lookup
 
-Provides atomic rate limiting using Redis INCR + EXPIRE.
-Graceful degradation: if Redis is unavailable, all requests are allowed.
+Provides:
+- Atomic rate limiting via Redis INCR + EXPIRE.
+- CSSV1 R5 (S7) duplicate-lookup primary tier — tenant-keyed
+  preflight cache read for ``POST /api/duplicate/lookup``. Ten-millisecond
+  p99 budget on the Redis-direct path; the route falls back to HB on
+  miss or Redis-down per ``RELAY_PHASE1_DESIGN_ALIGNMENT_2026_05_09 §4.5``.
 
-This is the ONLY Redis consumer in Relay. Dedup stays with HeartBeat.
-Blob storage stays with HeartBeat. Only rate limiting uses Redis directly.
+Graceful degradation: if Redis is unavailable, rate-limit requests are
+allowed and duplicate lookups return ``None`` (route then tries HB
+fallback, and if that also fails, allows the upload — data safety > rate
+limiting).
 
 Does NOT inherit BaseClient — HTTP retry logic doesn't apply to Redis
 (sub-millisecond atomic ops, not multi-second HTTP round-trips).
+
+Note: the duplicate-lookup tier reads only. The cache write-back (i.e.
+populating Redis from ``/api/ingest`` happy path) is wired in CSSV1 S4
+(R7 + ``record_duplicate()`` cleanup) — until S4 lands, the Redis tier
+will essentially always miss and traffic falls to the HB tier. Expected.
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -184,3 +196,60 @@ class RedisClient:
         except Exception:
             self._available = False
             return False
+
+    # ── CSSV1 S7 (R5) — Duplicate Lookup Primary Tier ──────────────────
+
+    async def check_duplicate(
+        self,
+        tenant_id: str,
+        file_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Tenant-keyed Redis lookup for ``POST /api/duplicate/lookup`` primary tier.
+
+        Key shape: ``{prefix}:dedup:{tenant_id}:{file_hash}``.
+
+        The ``tenant_id`` segment IS the cross-tenant guard at the cache
+        layer. A SET-membership probe by a wrong tenant returns "not
+        present" without the request ever leaving Relay.
+
+        Args:
+            tenant_id: Caller's tenant id (from ``CallerContext``).
+            file_hash: SHA-256 hex digest, lowercase, 64 chars.
+
+        Returns:
+            - Cached side-response dict on hit (caller returns directly).
+            - ``None`` on miss OR on Redis exception (caller falls back
+              to HB). On exception, ``self._available`` is flipped to
+              ``False`` so subsequent calls within the same request
+              don't re-raise.
+        """
+        if not self._available or self._redis is None:
+            return None
+
+        key = f"{self._prefix}:dedup:{tenant_id}:{file_hash}"
+
+        try:
+            cached = await self._redis.get(key)
+        except Exception as e:
+            logger.warning(
+                f"Redis check_duplicate failed — falling through to HB: {e}"
+            )
+            self._available = False
+            return None
+
+        if cached is None:
+            return None
+
+        try:
+            return json.loads(cached)
+        except (TypeError, json.JSONDecodeError) as e:
+            # Corrupt cache entry — log + treat as miss. Do NOT poison
+            # the response; the HB fallback will return authoritative
+            # state. Don't flip _available here either — Redis itself
+            # is fine; only this entry is bad.
+            logger.warning(
+                f"Redis check_duplicate cache decode failed for "
+                f"{key[:64]}...: {e}"
+            )
+            return None
