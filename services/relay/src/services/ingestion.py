@@ -26,11 +26,11 @@ Identity model:
                        Forwarded to HeartBeat as blob_batches.batch_display_id.
 """
 
-import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from helium_hash import sha256_file
 from uuid6 import uuid7
 
 from ..config import RelayConfig
@@ -146,7 +146,9 @@ class IngestionService:
         per_file_hashes: List[str] = []
 
         for filename, file_data in files:
-            file_hash = hashlib.sha256(file_data).hexdigest()
+            # CSSV1 S4 (R7): canonical SHA-256 via helium_hash. Same
+            # primitive as HB / Float SDK / Reader/Scout SDK.
+            file_hash = sha256_file(file_data)
             per_file_hashes.append(file_hash)
 
             dedup_result = await dedup.check(file_data)
@@ -219,25 +221,20 @@ class IngestionService:
             f"{len(files)} files, data_uuid={data_uuid}"
         )
 
-        # Record dedup hashes after successful commit
-        # Level 1: Session cache (in-memory, per-request)
+        # Record dedup hashes after successful commit (session cache only).
+        #
+        # CSSV1 S4 (R7): the Level-2 HeartBeat persistent record path was
+        # deleted in this chip. Authoritative dedup state now flows
+        # through HB's own /api/blobs/register handler (D2) which writes
+        # `blob.blob_deduplication` rows as a side effect of the blob
+        # commit at Step 4. Relay no longer makes a separate
+        # /api/dedup/record call — that was an outbound chip from the
+        # pre-CSSV1 design and is now redundant.
+        #
+        # Session cache (Level 1) stays — it catches in-request
+        # duplicates without an HB round-trip per file.
         for file_hash in per_file_hashes:
             dedup.record(file_hash)
-
-        # Level 2: HeartBeat persistent record (across requests)
-        for file_hash in per_file_hashes:
-            try:
-                await self._heartbeat.record_duplicate(
-                    file_hash=file_hash,
-                    queue_id=data_uuid,
-                )
-            except Exception as e:
-                # Graceful degradation: if HeartBeat record fails,
-                # session cache still catches within-batch duplicates
-                logger.warning(
-                    f"[{trace_id}] HeartBeat dedup record failed "
-                    f"(hash={file_hash[:12]}...): {e}"
-                )
 
         # ── Step 5: Enqueue Core (best-effort) ────────────────────────────
         queue_id = await self._enqueue_core(

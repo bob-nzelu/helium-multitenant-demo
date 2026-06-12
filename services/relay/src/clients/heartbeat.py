@@ -27,8 +27,8 @@ Auth model (post-HMAC-cutover 2026-05-09 per HMAC_S2S_MIGRATION_SPEC.md
       §4.2 ("wire your audit emission via the same helper now so you
       get auth-enabled-for-free later" once D-audit fix lands). HB
       currently ignores the headers; harmless.
-    - Metrics report, dedup record: No auth (not in §1.5 migration list).
-      Follow-up chip if HB tightens auth on these endpoints.
+    - Metrics report: No auth (not in §1.5 migration list).
+      Follow-up chip if HB tightens auth on this endpoint.
     - Health: No auth.
 
 Audit logging and metrics are fire-and-forget: failures are logged
@@ -81,7 +81,8 @@ class HeartBeatClient(BaseClient):
 
         # Deduplication
         POST /api/dedup/check        → Check for duplicate hash
-        POST /api/dedup/record       → Record processed hash
+        # (record_duplicate removed in CSSV1 S4 R7 — HB writes the
+        #  blob.blob_deduplication row as a side effect of /api/blobs/register)
 
         # Limits
         POST /api/limits/daily/check → Check daily usage limit
@@ -398,44 +399,15 @@ class HeartBeatClient(BaseClient):
 
         return await self.call_with_retries(_check)
 
-    async def record_duplicate(
-        self,
-        file_hash: str,
-        queue_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Record a file hash after successful processing.
-
-        POST /api/dedup/record  JSON: {file_hash, queue_id}
-
-        Args:
-            file_hash: SHA256 hex digest.
-            queue_id: Queue ID the file was processed under.
-
-        Returns:
-            {file_hash, queue_id, status}
-        """
-        async def _record():
-            http = self._get_http()
-            headers = self.get_trace_headers()
-
-            self._calls.append(("record_duplicate", file_hash, queue_id))
-
-            try:
-                resp = await http.post(
-                    "/api/dedup/record",
-                    json={"file_hash": file_hash, "queue_id": queue_id},
-                    headers=headers,
-                )
-            except httpx.ConnectError as e:
-                raise HeartBeatUnavailableError(
-                    message=f"Cannot connect to HeartBeat for dedup record: {e}"
-                ) from e
-
-            self._raise_for_status(resp, "record_duplicate")
-            return resp.json()
-
-        return await self.call_with_retries(_record)
+    # ── (CSSV1 S4 R7) ``record_duplicate()`` removed ───────────────────────
+    #
+    # The legacy ``POST /api/dedup/record`` call was deleted in CSSV1 S4.
+    # HB now writes the canonical ``blob.blob_deduplication`` row as a
+    # side effect of the ``POST /api/blobs/register`` handler (D2) — there
+    # is no separate "record" hop from Relay. If you're tempted to add
+    # one back, the right answer is "HB's register handler should be the
+    # source of truth"; surface the gap as an HB chip, not a Relay
+    # workaround.
 
     # ── Daily Limits ───────────────────────────────────────────────────────
 

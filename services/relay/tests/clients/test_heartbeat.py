@@ -261,27 +261,12 @@ class TestHeartBeatCheckDuplicate:
             await hb_client.check_duplicate("hash123")
 
 
-# ── Record Duplicate Tests ───────────────────────────────────────────────
-
-
-class TestHeartBeatRecordDuplicate:
-    """Test record_duplicate method — POST /api/dedup/record."""
-
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_record_success(self, hb_client):
-        respx.post(f"{HEARTBEAT_URL}/api/dedup/record").mock(
-            return_value=Response(201, json={
-                "file_hash": "hash-abc",
-                "queue_id": "queue-001",
-                "status": "recorded",
-            })
-        )
-
-        result = await hb_client.record_duplicate("hash-abc", "queue-001")
-        assert result["file_hash"] == "hash-abc"
-        assert result["queue_id"] == "queue-001"
-        assert result["status"] == "recorded"
+# ── Record Duplicate Tests (REMOVED — CSSV1 S4 R7) ───────────────────────
+#
+# The legacy ``record_duplicate()`` method was deleted in CSSV1 S4.
+# HB now writes ``blob.blob_deduplication`` rows as a side effect of
+# ``/api/blobs/register`` (D2). The standalone `POST /api/dedup/record`
+# endpoint is no longer called from Relay.
 
 
 # ── Daily Limit Tests ────────────────────────────────────────────────────

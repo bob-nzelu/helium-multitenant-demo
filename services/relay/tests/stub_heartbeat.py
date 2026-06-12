@@ -44,9 +44,8 @@ class StubHeartBeatClient(HeartBeatClient):
             "original_queue_id": None,
         }
 
-    async def record_duplicate(self, file_hash, queue_id):
-        self._calls.append(("record_duplicate", file_hash, queue_id))
-        return {"file_hash": file_hash, "queue_id": queue_id, "status": "recorded"}
+    # CSSV1 S4 R7: record_duplicate() removed — HB writes
+    # blob.blob_deduplication as a side effect of /api/blobs/register.
 
     async def check_daily_limit(self, company_id, file_count=1):
         self._calls.append(("check_daily_limit", company_id, file_count))

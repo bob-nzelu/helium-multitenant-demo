@@ -9,12 +9,19 @@ Level 2: HeartBeat persistent check (across all uploads, all tenants).
 
 Graceful degradation: If HeartBeat is unavailable, allow the upload
 and log a warning. Session cache still catches within-batch duplicates.
+
+Hash algorithm: SHA-256 via the canonical ``helium_hash`` library
+(CSSV1 D8 / S4 R7 — `HASHING_CONTRACT.md`). Same primitive shipped to
+HB, Float SDK, and Reader/Scout SDK so the four consumers agree
+byte-for-byte. Do NOT call ``hashlib.sha256`` directly here — that
+would diverge from the canonical 64 KiB chunk + lowercase-hex contract.
 """
 
-import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set, Tuple
+
+from helium_hash import sha256_file
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +64,10 @@ class DedupChecker:
 
     @staticmethod
     def compute_hash(file_data: bytes) -> str:
-        """Compute SHA256 hex digest of file data."""
-        return hashlib.sha256(file_data).hexdigest()
+        """Compute SHA-256 hex digest of file data via the canonical
+        ``helium_hash`` library (CSSV1 D8). Lowercase 64-char hex.
+        """
+        return sha256_file(file_data)
 
     async def check(self, file_data: bytes) -> DedupResult:
         """
