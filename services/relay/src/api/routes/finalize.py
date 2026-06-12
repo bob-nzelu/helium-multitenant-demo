@@ -97,7 +97,12 @@ async def finalize(request: Request):
     body = await _read_finalize_body(request)
 
     ref = str(body.get("ref") or "").strip()
-    trace_id = str(body.get("trace_id") or "").strip() or (ctx.trace_id or trace_state)
+    # CLIENT-supplied trace_id ONLY — never fall back to the auto-generated
+    # request trace_id (request.state.trace_id). That fallback would (a) mask the
+    # missing-reference 400 (trace_id would always be non-empty) and (b) give
+    # every ref-only request a fresh idempotency key, breaking ref-based dedup.
+    # The request trace_id stays for logging (`trace_state`) only.
+    trace_id = str(body.get("trace_id") or "").strip()
     doc_ref = str(body.get("doc_ref") or "").strip()
 
     # JWT forwarding (mirrors /api/ingest §3.1): user path forwards the JWT so
