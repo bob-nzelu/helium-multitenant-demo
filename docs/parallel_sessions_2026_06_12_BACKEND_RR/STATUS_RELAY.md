@@ -122,7 +122,7 @@ status codes — for Reader per-invoice **and** bulk, by **Mon 2026-06-16**. Bui
 
 | Chip | Scope | §B | Day | Cross-seat dep |
 |---|---|---|---|---|
-| **R-M0** | SBS debt audit (per-§B gap map + `VERB_DELTA`) → `services/relay/Documentation/READER_RELAY_INTEGRATION_DEBT_MAP_2026_06_12.md` | all Relay §B | **Thu — in-flight (bg sub-agent)** | — |
+| **R-M0** | SBS debt audit (per-§B gap map + `VERB_DELTA`) → `services/relay/Documentation/READER_RELAY_INTEGRATION_DEBT_MAP_2026_06_12.md` | all Relay §B | **✅ Thu — landed** | — |
 | **R-M1** | Merge **#21** `@ f3a3654`; split **#22** → land R7 helium-hash + `record_duplicate()` deletion, freeze R12 (L5); (opt) S5-row trickle-down doc PR to helium-services | L3 | **Thu** | — |
 | **R-M2** | **§B-Submit:** `/api/ingest` honor `metadata.finalize=false\|true`; **NEW `POST /api/finalize {ref, trace_id}`** (ref-only #3, no bytes; 409 dup/already-finalized = client success; `trace_id` carried #2↔#3); emit `relay.finalize.accepted` echoing `trace_id`; fold S3 R11 Idempotency-Key if natural | §B-Submit / §B-IngestFinalize / §B-EventLog | **Thu→Fri** | **Core** (accept finalize trigger; emit `core.artifact.hlx_available` + `core.submission.terminal` echoing `trace_id`) |
 | **R-M3** | **§B-Drift:** version-axis check middleware on every sensitive mutating route → `409 {code:"version_drift", axis, expected, got}`, request NOT forwarded; 4 axes `policy_revision` / `license_state_id` / `user_permissions:<uid>` / `auth_policy_revision` | §B-Drift / §B-VersionAxes | **Fri→Sat** | **HB** (axis header names + authoritative-value feed — HB-2 fabric) |
@@ -183,6 +183,14 @@ R-M2 builds the emission behind a `LifecyclePublisher` seam so the arbitrated si
   branch** — `git show origin/...:<path>` fails for both, so the §1.5 canonical-read and your 30-min origin
   drift-detector can't observe rev `2026-06-12-a` until the Scout seat pushes. I read worktree-direct meanwhile
   (sanctioned §1.5 fallback). Scout seat owns the push; this is the Q8-class unpushed-loss risk — worth a Bob nudge.
+- **NEEDS FROM ARCH — R-M0 audit rulings (3)** · detail in `services/relay/Documentation/READER_RELAY_INTEGRATION_DEBT_MAP_2026_06_12.md`:
+  **(a) §B-VersionAxes** — the canonical inbound header spelling (e.g. `X-Policy-Revision`) **+** the 4th-axis
+  identity: SBS first-classes `usage_state_id`, but CLAUDE.md §B-VersionAxes names the 4th `user_permissions:<user_id>`
+  (composite-only in SBS) — which axis set must R-M3's drift-gate check? **(b) §B-RelayArtifactFetch** — is
+  bytes-vs-JSON signalled by the request (`artifact_type`) or inferred by Relay, and the closed kind enumeration
+  (which kinds are hard-bytes vs lifecycle-JSON)? **(c)** = ARCH-2 above, now sharpened: `CoreClient` is an HTTP
+  stub, so Monday's bar is "wire the stub" (small) vs "stand up an AMQP publisher" (large). **VERB_DELTA confirmed:**
+  artifact-fetch is **POST-body** (`artifact_ref` is a bearer capability — never in a URL).
 
 ## Updates
 
@@ -201,3 +209,9 @@ R-M2 builds the emission behind a `LifecyclePublisher` seam so the arbitrated si
   START_HERE + SCOUT_IMPLEMENTATION_STATUS (rev `2026-06-12-a`) + §B-\* full. **Status → ACTIVE.** MONDAY PLAN
   posted (R-M0…R-M4 + Q15 input + risks + Monday needs). **R-M0 SBS debt audit launched as background sub-agent.**
   Next execution step: R-M1 merge chain (#21 merge + #22 split mechanics).
+- 2026-06-12, R-M0 landed: SBS debt audit complete → `services/relay/Documentation/READER_RELAY_INTEGRATION_DEBT_MAP_2026_06_12.md`
+  (6 Relay §B obligations, ~0.5 met, 5 net-new; per-§B chips Thu→Sun; the load-bearing VERB_DELTA = artifact-fetch
+  POST-body). Audit found the Scout worktree at rev **`2026-06-12-b`** (HEAD `5a44bd4`) — one tick past the `-a`
+  baseline, prose-only, **no Relay-clause change** (reinforces ARCH-3). 3 rulings raised to ARCH (axis headers /
+  artifact kind+signalling / Core transport — see Needs). MONDAY PLAN `67367fc` pushed to origin on retry —
+  **`git push` needs sandbox-off here** (SSL EOF under sandbox). Next: R-M1 merge chain.
