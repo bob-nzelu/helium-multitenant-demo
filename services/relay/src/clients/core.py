@@ -162,6 +162,50 @@ class CoreClient(BaseClient):
 
         return await self.call_with_retries(_process)
 
+    async def fetch_lifecycle_artifact(
+        self,
+        artifact_ref: str,
+        artifact_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch a LIFECYCLE artifact as raw JSON by reference.
+
+        BACKEND CONTRACT (CLAUDE.md "Backend Debt Notes" §B-RelayArtifactFetch):
+        lifecycle artifacts (HLX, FIRS-returned artifact, approval-lifecycle
+        JSON, manifest) are owned by Core, not HB blob storage. Relay's
+        artifact-fetch route returns these as raw JSON to Scout only (Reader
+        never receives the raw JSON — Scout reduces it to display-safe fields).
+
+        NEEDS-CORE: Core must expose a **POST-body** lifecycle-JSON-by-ref
+        endpoint (``artifact_ref`` is a bearer capability — must NOT travel in
+        a URL; cf. the existing Core ``GET /api/invoices/<id>`` shape that the
+        VERB_DELTA ruling already flags for migration). Modelled here as
+        ``POST /api/artifacts/lifecycle {artifact_ref, artifact_type}``
+        returning the JSON document. Phase-1 stub: returns ``None`` so the
+        route's miss path (ARTIFACT_NOT_FOUND) is the default until Core wires
+        a real store; route correctness is proven with this client mocked.
+
+        Args:
+            artifact_ref: Capability handle for the lifecycle artifact.
+            artifact_type: Optional explicit kind (hlx / firs_returned_artifact
+                / approval_lifecycle_json / manifest) forwarded to Core.
+
+        Returns:
+            The lifecycle JSON document on a hit, or ``None`` on a miss.
+        """
+        async def _fetch():
+            # Phase 1 stub — no Core lifecycle store wired yet (NEEDS-CORE).
+            # Returns None so the route resolves to ARTIFACT_NOT_FOUND; tests
+            # mock this method to exercise the JSON hit path.
+            logger.debug(
+                f"Core fetch_lifecycle_artifact (stub) — "
+                f"ref={artifact_ref[:12]}..., type={artifact_type}",
+                extra={"trace_id": self.trace_id},
+            )
+            return None
+
+        return await self.call_with_retries(_fetch)
+
     async def finalize(
         self,
         queue_id: str,

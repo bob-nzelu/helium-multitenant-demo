@@ -34,6 +34,7 @@ from ..services.bulk import BulkService
 from ..services.external import ExternalService
 from ..services.ingestion import IngestionService
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
+from .routes.artifacts import router as artifacts_router
 from .routes.health import router as health_router
 from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
@@ -206,5 +207,7 @@ def create_app(
     app.include_router(metrics_router)
     app.include_router(ingest_router)
     app.include_router(internal_router)
+    # §B-RelayArtifactFetch — POST-body artifact fetch (bytes | lifecycle JSON).
+    app.include_router(artifacts_router)
 
     return app

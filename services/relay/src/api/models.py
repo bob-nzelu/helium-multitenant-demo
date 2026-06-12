@@ -57,6 +57,34 @@ class IngestResponse(BaseModel):
     )
 
 
+# ── Artifact Fetch Request (§B-RelayArtifactFetch) ───────────────────────
+
+
+class ArtifactFetchRequest(BaseModel):
+    """Request body for ``POST /api/artifacts/fetch``.
+
+    VERB_DELTA (CLAUDE.md "Backend Debt Notes" §B-RelayArtifactFetch): the
+    ``artifact_ref`` is a capability-bearing handle for raw signed-PDF / HLX /
+    FIRS bytes and MUST travel in the POST body — NEVER in a URL/querystring/
+    path (it would otherwise leak into proxy logs, referrers, and browser
+    history). ``artifact_type`` is the explicit kind discriminator the Scout
+    ``ScoutRelayArtifactFetchAdapter`` already sends; Relay uses it to decide
+    bytes-vs-JSON, falling back to inference from the ref prefix when absent.
+    """
+
+    artifact_ref: str = Field(
+        description="Capability handle for the artifact (NEVER placed in a URL).",
+    )
+    artifact_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "Explicit artifact kind discriminator (e.g. signed_pdf, qr_invoice, "
+            "hlx, approval_lifecycle_json, manifest). Falls back to ref-prefix "
+            "inference when omitted."
+        ),
+    )
+
+
 # ── Error Response ───────────────────────────────────────────────────────
 
 
