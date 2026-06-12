@@ -36,6 +36,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _coerce_finalize(value: object) -> Optional[bool]:
+    """Coerce ``metadata.finalize`` into a tri-state bool.
+
+    Returns True/False when the field is present and interpretable, or None
+    when absent/unset so the caller falls back to ``call_type`` routing
+    (back-compat). Accepts JSON bools and the common string spellings
+    ("true"/"false"/"1"/"0") that survive a multipart metadata round-trip.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("true", "1", "yes"):
+            return True
+        if token in ("false", "0", "no", ""):
+            return False
+    return None
+
+
 @router.post(
     "/api/ingest",
     response_model=IngestResponse,
@@ -88,6 +111,24 @@ async def ingest(
             meta = json.loads(metadata)
         except (json.JSONDecodeError, TypeError):
             logger.warning(f"[{trace_id}] Invalid metadata JSON — ignoring")
+
+    # ── §B-Submit: metadata.finalize is the contract axis (3-call taxonomy). ──
+    # finalize=false → ingest#1 passive (register opener, pre-process, status/QR
+    #                  refs + doc_ref/irn; NEVER Final Success) = bulk/preview path.
+    # finalize=true  → ingest#2 (same HLX path PLUS the FIRS push) = external
+    #                  IRN/QR path.
+    # call_type is kept for back-compat: it decides the path ONLY when
+    # metadata.finalize is absent. When metadata.finalize is present it wins,
+    # and we normalise call_type so the downstream selection + queue_mode agree.
+    finalize_flag = _coerce_finalize(meta.get("finalize"))
+    if finalize_flag is not None:
+        effective_call_type = "external" if finalize_flag else "bulk"
+        if effective_call_type != call_type:
+            logger.info(
+                f"[{trace_id}] metadata.finalize={finalize_flag} overrides "
+                f"call_type={call_type} → {effective_call_type}"
+            )
+        call_type = effective_call_type
 
     # For the user JWT path (§3.1), forward the JWT downstream so HB can
     # attribute blob/audit entries to the user, not to Relay. For HMAC and

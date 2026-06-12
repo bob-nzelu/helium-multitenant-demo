@@ -281,6 +281,60 @@ class DuplicateFileError(RelayError):
         self.original_queue_id = original_queue_id
 
 
+class AlreadyFinalizedError(RelayError):
+    """
+    A finalize (#3) call arrived for a ``trace_id`` (or ``ref``) that has
+    already been finalized.
+
+    Per §B-Submit (CLAUDE.md L260-266 / SCOUT contract §3.3) a duplicate /
+    already-finalized ``trace_id`` returns **409**, which the client treats
+    as success (idempotent). The same ``trace_id`` is carried across the
+    #2↔#3 switch so a retry that flips call type still dedups backend-side.
+
+    This differs from an idempotent *replay* (same call repeated): a replay
+    returns the cached 202 body with ``idempotent_replay=True``; this 409 is
+    the explicit "already terminal" signal the contract names.
+    """
+
+    def __init__(
+        self,
+        ref: str = "",
+        trace_id: str = "",
+        original_event_id: Optional[str] = None,
+    ):
+        super().__init__(
+            error_code="ALREADY_FINALIZED",
+            message="This document has already been finalized.",
+            details=[{
+                **({"ref": ref} if ref else {}),
+                **({"trace_id": trace_id} if trace_id else {}),
+                **({"original_event_id": original_event_id} if original_event_id else {}),
+            }],
+            status_code=409,
+        )
+        self.ref = ref
+        self.trace_id = trace_id
+        self.original_event_id = original_event_id
+
+
+class FinalizeReferenceMissingError(ValidationFailedError):
+    """A finalize (#3) call arrived with neither ``ref`` nor ``trace_id``.
+
+    The #3 reference-only call fiscalizes an already-ingested doc *by
+    reference* (file SHA-256 / ``trace_id`` / ``doc_ref``). With no
+    reference at all there is nothing to fiscalize — 400, never a silent
+    no-op (§B-Submit, "never silent").
+    """
+
+    def __init__(self):
+        super().__init__(
+            message=(
+                "finalize requires a reference: provide 'ref' "
+                "(file SHA-256 / doc_ref) and/or 'trace_id'."
+            ),
+        )
+
+
 # ── Internal Error (500) ──────────────────────────────────────────────────
 
 

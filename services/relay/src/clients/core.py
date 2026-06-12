@@ -189,3 +189,77 @@ class CoreClient(BaseClient):
             }
 
         return await self.call_with_retries(_finalize)
+
+    async def finalize_by_reference(
+        self,
+        ref: str,
+        trace_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Trigger Core's fiscalize lifecycle for an already-ingested doc by
+        reference (#3 finalize — NO bytes). Carries the client ``trace_id``
+        through so Core's lifecycle SSE echoes it (§B-Submit / §B-EventLog).
+
+        NEEDS-CORE: Core must accept this finalize trigger and emit
+        ``core.artifact.hlx_available`` + ``core.submission.terminal`` echoing
+        ``trace_id`` (cross-seat). Today this is an HTTP stub (canned dict);
+        the real call is ``POST {core}/api/finalize`` (or equivalent). Per the
+        discretionary ARCH ruling (debt-map Open Q (c)), Relay→Core transport
+        for Monday is HTTP via this client, NOT AMQP.
+
+        Args:
+            ref: doc reference — file SHA-256 / doc_ref / trace_id.
+            trace_id: client-supplied UUIDv7; echoed by Core on the SSE.
+            metadata: forwarded identity/trace fields.
+            jwt_token: Bearer JWT (forwarded for user attribution).
+
+        Returns:
+            {"ref": str, "status": "finalized", "trace_id": str}
+        """
+        async def _finalize_ref():
+            logger.debug(
+                "Core finalize_by_reference (stub) — ref=%s trace_id=%s",
+                ref[:16],
+                trace_id or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            return {
+                "ref": ref,
+                "status": "finalized",
+                "trace_id": trace_id,
+            }
+
+        return await self.call_with_retries(_finalize_ref)
+
+    async def publish_lifecycle_event(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Forward a Relay-originated lifecycle event frame to Core's SSE stream.
+
+        Relay does not host an SSE server (memory "Scout as SSE Driver" — Scout
+        connects to Core). Relay's §B-EventLog obligation is to forward the
+        frame (carrying the client ``trace_id``) so Core's stream echoes it.
+
+        NEEDS-CORE: real endpoint ``POST {core}/api/lifecycle/event`` (or the
+        AMQP exchange in the S3 hardening contract). HTTP stub for Monday.
+
+        Args:
+            frame: the lifecycle frame from ``LifecycleEvent.to_frame()``
+                   ({family, event, source, timestamp, trace_id?, data}).
+
+        Returns:
+            {"accepted": True, "family": str, "trace_id": str}
+        """
+        async def _publish():
+            family = str(frame.get("family") or "")
+            trace = str(frame.get("trace_id") or "")
+            logger.debug(
+                "Core publish_lifecycle_event (stub) — family=%s trace_id=%s",
+                family,
+                trace or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            return {"accepted": True, "family": family, "trace_id": trace}
+
+        return await self.call_with_retries(_publish)

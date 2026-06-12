@@ -57,6 +57,49 @@ class IngestResponse(BaseModel):
     )
 
 
+# ── Finalize (#3 reference-only call) ────────────────────────────────────
+
+
+class FinalizeRequest(BaseModel):
+    """Request body for POST /api/finalize — the #3 reference-only call.
+
+    Reference-only: fiscalizes an ALREADY-ingested doc by reference. NO PDF
+    bytes (§B-Submit). At least one of ``ref`` / ``trace_id`` must be present.
+
+        ref       — file SHA-256 / doc_ref (the backend already holds the bytes)
+        trace_id  — Scout UUIDv7; carried across the #2↔#3 switch (§3.3), echoed
+                    on the resulting lifecycle SSE
+        doc_ref   — optional explicit doc_ref (defaults to ``ref``)
+    """
+
+    ref: str = Field(default="", description="File SHA-256 / doc_ref of an already-ingested doc")
+    trace_id: str = Field(default="", description="Scout UUIDv7 — echoed on the lifecycle SSE")
+    doc_ref: str = Field(default="", description="Optional explicit doc_ref (defaults to ref)")
+
+
+class FinalizeResponse(BaseModel):
+    """Response from POST /api/finalize (HTTP 202 accepted).
+
+    ``raw_bytes_sent`` is always False — the #3 call carries no bytes. A
+    duplicate / already-finalized ``trace_id`` does NOT reach this shape; it
+    returns 409 ALREADY_FINALIZED (client treats as success).
+    """
+
+    status: str = Field(default="accepted", description="accepted")
+    call: str = Field(default="finalize", description="Always 'finalize'")
+    finalize_by_reference: bool = Field(default=True)
+    raw_bytes_sent: bool = Field(default=False)
+    ref: str = Field(default="", description="Echoed reference")
+    doc_ref: str = Field(default="", description="Resolved doc_ref")
+    trace_id: str = Field(default="", description="Echoed trace_id")
+    event_id: str = Field(default="", description="Lifecycle event id")
+    event_family: str = Field(default="", description="Lifecycle event family (relay.finalize.accepted)")
+    idempotent_replay: bool = Field(
+        default=False,
+        description="True if this was an idempotent replay of a prior finalize",
+    )
+
+
 # ── Error Response ───────────────────────────────────────────────────────
 
 
