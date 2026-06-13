@@ -23,7 +23,7 @@ class IngestResponse(BaseModel):
     Internal mapping: data_uuid = HeartBeat batch_uuid, file_uuids = HeartBeat blob_uuids
     """
 
-    status: str = Field(description="Result status: processed | queued | error")
+    status: str = Field(description="Result status: queued (bulk, accepted) | processed (external) | error")
     data_uuid: str = Field(description="Per-request group identifier (always present)")
     queue_id: str = Field(description="Core processing queue ID")
     filenames: List[str] = Field(description="Uploaded filenames")
@@ -40,11 +40,11 @@ class IngestResponse(BaseModel):
         description="Per-file SHA256 hashes (one per uploaded file)",
     )
 
-    # Bulk flow fields (present when status=processed)
-    preview_data: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Invoice preview from Core (bulk flow only)",
-    )
+    # NOTE (Q4): the bulk flow no longer returns the Core preview inline. The
+    # invoice preview is delivered asynchronously via the
+    # ``core.preview.available`` lifecycle event on Core's stream (Scout
+    # consumes it). The bulk response returns status="queued" promptly. The old
+    # ``preview_data`` field was removed from this model accordingly.
 
     # External flow fields (present when status=processed, external)
     irn: Optional[str] = Field(

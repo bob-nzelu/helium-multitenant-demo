@@ -155,17 +155,20 @@ def create_app(
         else:
             logger.warning("Module cache NOT loaded — external flow will return 503")
 
+        # Lifecycle publisher seam (§B-EventLog) — default sink forwards
+        # relay.*/core.* events to Core over HTTP (discretionary ARCH ruling
+        # (c); AMQP-first deferred to S3). Swappable via
+        # app.state.lifecycle_publisher. Built before the services so both
+        # BulkService (core.preview.available, Q4) and FinalizeService
+        # (relay.finalize.accepted) share the one instance.
+        lifecycle_publisher = CoreLifecyclePublisher(core)
+
         # Service layer
         ingestion = IngestionService(config, heartbeat, core, redis_client=redis_client)
         irn_gen = IRNGenerator(module_cache)
         qr_gen = QRGenerator(module_cache)
-        bulk_service = BulkService(ingestion, core)
+        bulk_service = BulkService(ingestion, core, lifecycle_publisher)
         external_service = ExternalService(ingestion, core, irn_gen, qr_gen)
-
-        # Lifecycle publisher seam (§B-EventLog) — default sink forwards
-        # relay.* events to Core over HTTP (discretionary ARCH ruling (c);
-        # AMQP-first deferred to S3). Swappable via app.state.lifecycle_publisher.
-        lifecycle_publisher = CoreLifecyclePublisher(core)
         finalize_service = FinalizeService(core, lifecycle_publisher)
 
         # Store in app state
