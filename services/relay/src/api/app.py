@@ -32,9 +32,12 @@ from ..observability.startup_checks import (
 )
 from ..services.bulk import BulkService
 from ..services.external import ExternalService
+from ..services.finalize import FinalizeService
 from ..services.ingestion import IngestionService
+from ..services.lifecycle import CoreLifecyclePublisher
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
 from .routes.duplicate import router as duplicate_router
+from .routes.finalize import router as finalize_router
 from .routes.health import router as health_router
 from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
@@ -159,6 +162,12 @@ def create_app(
         bulk_service = BulkService(ingestion, core)
         external_service = ExternalService(ingestion, core, irn_gen, qr_gen)
 
+        # Lifecycle publisher seam (§B-EventLog) — default sink forwards
+        # relay.* events to Core over HTTP (discretionary ARCH ruling (c);
+        # AMQP-first deferred to S3). Swappable via app.state.lifecycle_publisher.
+        lifecycle_publisher = CoreLifecyclePublisher(core)
+        finalize_service = FinalizeService(core, lifecycle_publisher)
+
         # Store in app state
         app.state.config = config
         app.state.api_key_secrets = api_key_secrets
@@ -172,6 +181,8 @@ def create_app(
         app.state.ingestion = ingestion
         app.state.bulk_service = bulk_service
         app.state.external_service = external_service
+        app.state.lifecycle_publisher = lifecycle_publisher
+        app.state.finalize_service = finalize_service
 
         # Envelope placeholder (NaCl encryption configured later)
         app.state.envelope = None
@@ -206,6 +217,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(metrics_router)
     app.include_router(ingest_router)
+    app.include_router(finalize_router)
     app.include_router(internal_router)
     app.include_router(duplicate_router)
 
