@@ -5,7 +5,7 @@
 **Repo / worktree:** `C:\Users\PROBOOK\helium-multitenant-demo` (Relay's home + EC2 deploy repo)
 **Branch:** `feat/relay-cssv1-s4-hash-lib-record-duplicate-webhook` (S4 / PR #22 branch at RR launch)
 **Fork point:** `9d2120e` (main tip; one S4 commit `7a661cb` on top = PR #22 head). Working tree clean.
-**Status:** ACTIVE (REGISTRATION-ACK 2026-06-12; Monday-readiness directive overlay — see MONDAY PLAN)
+**Status:** HOLDING FOR ARCH+BOB REVIEW (2026-06-12) — merge chain done + R-M2 (#24) done; R-M3/R-M4 WIP preserved, NOT resumed until instructed. See SESSION REPORT + Addendum.
 **Handoff:** `HANDOFF_RELAY_SEAT.md` (ARCH channel) + inherited `~/.claude/agent-briefs/RELAY_FABLE5_ARCH_HANDOFF.md`
 **Watcher:** 30-min tick per protocol §5 (started this session)
 
@@ -252,3 +252,19 @@ R-M2 builds the emission behind a `LifecyclePublisher` seam so the arbitrated si
 - **BOB MENTAL-MODEL ALIGNMENT (pending Bob's confirm):** the canonical Relay frontend API surface = ingest(passive) · finalize-with-upload · finalize-by-ref · update-payment · approve · reject · reset · **restart** · nudge(+approver) · withdraw · **reverse (Credit Note) + reversal-approval sub-flow** · **artifact-fetch (`POST /api/artifacts/fetch`)**; + **deferred Inbound family (L13)**; all under the version-drift 409 guard; JWT/HMAC auth; status inline + Core-SSE. Bob's additions to surface: **Reverse** + **Artifact-fetch** were not in his initial list (both touch Core/Scout). Ingest#1 IRN/QR are **provisional** (FIRS push only at finalize). Update-Payment exists on outbound **and** inbound sides.
 - **FLAG (minor doc inconsistency):** STATUS_ARCH "Needs from seats → RELAY" line still reads "Q17 axis set = documented four" — superseded by its own round-3 "Q17 RATIFIED FIVE". I built to five.
 - **Deferred:** #10 close (Q21 post-Monday); debt-map cutover-DELTA rows (`X-SBS-*`→`X-Relay-Artifact-*`, colon→`X-Helium-*`).
+
+### Addendum — 2026-06-12 (post-report) + HOLD FOR REVIEW
+
+**Status → HOLDING FOR ARCH+BOB REVIEW.** Per Bob's direct instruction this block: **stop all further implementation** — R-M3/R-M4 finishes **NOT started** — until ARCH reviews this checkpoint **with Bob** and instructs (direct or via channel). Review artifacts on origin: PRs **#23** (R7+recdup), **#24** (R-M2, MERGEABLE), WIP branches **rm3** (`68c4243`) / **rm4** (`47ccedc`), the debt map (`services/relay/Documentation/READER_RELAY_INTEGRATION_DEBT_MAP_2026_06_12.md`), this STATUS. (#22 now shows CONFLICTING — **expected + benign**: it's the frozen-R12 + channel-docs home, never merging.)
+
+**BOB-RULING (direct, 2026-06-12) — QR / IQC flow** (refines §B-Submit; ARCH please capture + fan out to Scout/Core):
+- **QR is generated locally by the versioned IQC module, NOT FIRS.** IQC = **IRN/QR/CSID**, lives in **`helium_formats.iqc`**, **shared Core+Relay** — verified in legacy Core `WS_PREREQ_TRANSFORMA.md` (`script_category="IQC"` → Core+Relay; `TRANSFORMA` → Core-only + SHA-256-validated; "no hash needed for IQC"). Current Relay already caches it behind `core/qr.py` + `core/irn.py` via `module_cache`.
+- **QR bytes return INLINE on EVERY ingest + finalize call** (not just finalize, not a ref) → Scout **proactively builds/caches** the QR artifact without presenting it. R-M4 artifact-fetch is the **durable/re-open path only**, not the primary QR channel.
+- Ingest#1 IRN/QR are the **real deterministic** values (NOT "provisional" — I had this wrong); finalize changes **submission status** (FIRS transmission), not the QR.
+- **OPEN QUESTION (review):** every ingest path must emit QR — but **today only the external path returns `qr_code`; bulk returns `preview_data` (no QR)**. Confirm bulk-multi-file QR semantics (per-file QR on bulk?). Affects R-M2's shape → possible follow-up chip.
+
+**BOB ALIGNMENT — module-update mechanism** (ARCH capture): **script modules** (IQC/TRANSFORMA) update via an **app/script update** (hash-validated for TRANSFORMA, not IQC); **config files** download **over the wire** (HB single config endpoint); HB prompts services on a tenant-intelligence / IQC-version change via the **§B-Policy/version-axis fabric** (`policy_revision` covers intelligence-pack identity) → R-M3's drift-409 is the commit-time enforcement edge.
+
+**BOB ALIGNMENT — frontend API surface ratified** (from the mental-model exchange): the 12-item surface (ingest passive / finalize-with-upload / finalize-by-ref / update-payment / approve / reject / reset / **restart** / nudge(+approver) / withdraw / **reverse (Credit Note) + reversal-approval** / **artifact-fetch**) + deferred Inbound (L13), all under the drift-409 guard. Bob's net additions vs his initial list: **Reverse** + **Artifact-fetch**.
+
+**Honest caveat:** legacy **Relay** `src/` on OneDrive is **NOT hydrated locally** (Files-On-Demand placeholders — ripgrep/Get-ChildItem return empty), so a line-level legacy-Relay logic diff is **pending hydration**; the IQC contract above is grounded in the readable legacy **Core** doc + the current Relay. To do the real diff, the folder needs "always keep on this device."
