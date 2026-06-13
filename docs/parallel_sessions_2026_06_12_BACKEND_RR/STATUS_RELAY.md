@@ -5,7 +5,7 @@
 **Repo / worktree:** `C:\Users\PROBOOK\helium-multitenant-demo` (Relay's home + EC2 deploy repo)
 **Branch:** `feat/relay-cssv1-s4-hash-lib-record-duplicate-webhook` (S4 / PR #22 branch at RR launch)
 **Fork point:** `9d2120e` (main tip; one S4 commit `7a661cb` on top = PR #22 head). Working tree clean.
-**Status:** HOLDING FOR ARCH+BOB REVIEW (2026-06-12) — merge chain done + R-M2 (#24) done; R-M3/R-M4 WIP preserved, NOT resumed until instructed. See SESSION REPORT + Addendum.
+**Status:** ACTIVE (resumed 2026-06-13; hold lifted) — #23/#24 merged; R-M3/R-M4/preview finishing via fresh-head agents. Watcher: 30-min active.
 **Handoff:** `HANDOFF_RELAY_SEAT.md` (ARCH channel) + inherited `~/.claude/agent-briefs/RELAY_FABLE5_ARCH_HANDOFF.md`
 **Watcher:** 30-min tick per protocol §5 (started this session)
 
@@ -268,3 +268,18 @@ R-M2 builds the emission behind a `LifecyclePublisher` seam so the arbitrated si
 **BOB ALIGNMENT — frontend API surface ratified** (from the mental-model exchange): the 12-item surface (ingest passive / finalize-with-upload / finalize-by-ref / update-payment / approve / reject / reset / **restart** / nudge(+approver) / withdraw / **reverse (Credit Note) + reversal-approval** / **artifact-fetch**) + deferred Inbound (L13), all under the drift-409 guard. Bob's net additions vs his initial list: **Reverse** + **Artifact-fetch**.
 
 **Honest caveat:** legacy **Relay** `src/` on OneDrive is **NOT hydrated locally** (Files-On-Demand placeholders — ripgrep/Get-ChildItem return empty), so a line-level legacy-Relay logic diff is **pending hydration**; the IQC contract above is grounded in the readable legacy **Core** doc + the current Relay. To do the real diff, the folder needs "always keep on this device."
+
+### Resume — 2026-06-13 (hold lifted, ACTIVE)
+
+Read STATUS_ARCH rounds 5–8 + protocol §5.1 (PARKED=60min / ACTIVE=30min self-resume) / §5.2 (fresh-head fan-out: agents implement+test+push, the **SEAT** runs its own verified pass + RR-submits, never "agent said green").
+
+**Merges landed (ARCH-vetted):** **#23** (R7+recdup) @ `43aae54` squash-merged → `8c1d885`; **#24** (R-M2 finalize) **base-confirmed vs current origin/main** (clean merge + **637 pass / 7 pre-existing fail** on the actual merge result) → squash-merged → `b2afaa6`. Main now carries S7 + R7 + R-M2-finalize.
+
+**Three fresh-head background agents spawned** (off `b2afaa6`, §5.2; each adapts its prior WIP draft + applies canon → tests → pushes; **no self-PR** — I re-verify + submit):
+- **R-M3** `feat/relay-cssv1-rm3-version-drift-v2` — `X-Helium-*` FIVE-axis drift guard on `/api/ingest` + `/api/finalize`.
+- **R-M4** `feat/relay-cssv1-rm4-artifact-fetch-v2` — `POST /api/artifacts/fetch`, `X-Relay-Artifact-*` headers, propose closed kind enum.
+- **Q4 preview** `feat/relay-cssv1-preview-available` — drop inline `preview_data`, emit `preview_available` via the lifecycle publisher (Core stream).
+
+**NEEDS — A1 (Redis DOWN), Monday-blocking:** Relay's rate-limit + HMAC-nonce store need Redis UP for the Monday deploy. Infra action (Bob/EC2). Test agents mock Redis; this is the live-deploy gap — surfacing for ARCH/Bob.
+
+Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent returns → my own verified test pass each → PRs + SUBMITTED entries (ARCH diff-vets every merge).
