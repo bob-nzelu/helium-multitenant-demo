@@ -283,3 +283,24 @@ Read STATUS_ARCH rounds 5–8 + protocol §5.1 (PARKED=60min / ACTIVE=30min self
 **NEEDS — A1 (Redis DOWN), Monday-blocking:** Relay's rate-limit + HMAC-nonce store need Redis UP for the Monday deploy. Infra action (Bob/EC2). Test agents mock Redis; this is the live-deploy gap — surfacing for ARCH/Bob.
 
 Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent returns → my own verified test pass each → PRs + SUBMITTED entries (ARCH diff-vets every merge).
+
+### Submitted — 2026-06-13 (3 finish chips PR'd + new ARCH items folded)
+
+**All three finish chips SUBMITTED** (each sub-agent was cut by the session limit before finishing; I preserved → finished → ran my OWN full-suite verified pass per §5.2, never "agent said green"):
+- **#25 R-M3 §B-Drift** — `X-Helium-*` 5-axis 409 gateway on `/api/ingest` + `/api/finalize`. **668 pass / 7 pre-existing.** `…-rm3-version-drift-v2` @ `e1a217d`.
+- **#26 R-M4 §B-RelayArtifactFetch** — `POST /api/artifacts/fetch`, `X-Relay-Artifact-*` (never `X-SBS-*`), kind enum proposed. **666 pass / 7 pre-existing.** `…-rm4-artifact-fetch-v2` @ `9d193a4`.
+- **#27 Q4 preview** — bulk drops inline `preview_data`, emits `core.preview_available` async via the publisher seam. **641 pass / 7 + 19 targeted.** `…-preview-available` @ `d4e3430`.
+
+**New ARCH items folded (STATUS_ARCH `86c3118`):**
+- **Q4 reconciliation (RELAY+CORE):** event ruled `*.preview_available` (underscore — I corrected the agent's SBS-dotted `core.preview.available`); **R-M4 artifact-fetch is the preview fetch channel.** OPEN for ARCH+Core: emitter (Relay-publishes vs Core-emits) + prefix (`core.` vs `relay.`). Flagged in #27.
+- **Q28 RATIFIED — durable ingestion record (`relay.db` write-first) now in go-live scope** → NEW Relay ingest-hardening task, not yet built.
+- **DIRECTIVE_LIVE_DEPLOYMENT_2026_06_13 — Monday is a REAL go-live** (real tenant): additive/reversible migrations + rollback; **Redis (A1) PRODUCTION-BLOCKING**; HMAC-s2s-only senders; validate vs real Sika, never fabricate.
+
+**R-M3 flags for ARCH:** (1) `/api/finalize` double-auth (guard `Depends` + in-handler) — idempotent/harmless per the e2e 202, but a 2nd introspect; (2) `usage_state_id` 409-drift vs SBS 429 `quota_refused` — confirm distinct gates; (3) composite `user_permissions` dormant until HB feeds the per-user revision.
+
+**NEEDS (go-live-blocking, NOT Relay code):**
+- **A1 Redis DOWN — production-blocking** (rate-limit + HMAC nonce). Infra/EC2.
+- **CORE:** finalize trigger + `core.artifact.hlx_available`/`core.submission.terminal`/`core.preview_available` echoing `trace_id`; SSE `#58` live; reconcile preview emitter.
+- **HB:** feed the 5 `X-Helium-*` axis VALUES + confirm names; `security.cross_tenant_denied` dual-fire (go-live-blocking); blob-fetch-by-ref.
+
+**Monday readiness (RELAY):** §B shapes for Scout = **complete** (merged #24 + submitted #25/#26/#27). **Live e2e NOT ready** — gated on A1 Redis, Core/HB backends behind Relay, the Q4 preview reconciliation, Q28 durability, + Scout's own cutover (SBS→real, SQLCipher). Relay is the front of the chain; the chain isn't live behind it. Next: ARCH verdicts on #25/#26/#27; scope Q28 durability; reconcile Q4 emitter with Core.
