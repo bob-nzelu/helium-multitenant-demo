@@ -51,12 +51,13 @@ FAMILY_FINALIZE_ACCEPTED = "relay.finalize.accepted"
 # now fetchable", scout_backend_simulator_events.py). Both ``core``/``relay``
 # prefixes are recognised by the 8-slug event gate (KNOWN_EVENT_PREFIXES,
 # owned by Core/HB).
-# Q4 ruling (STATUS_ARCH): the contract event is ``*.preview_available`` (underscore
-# token) — AUTHORITATIVE over the SBS dotted ``core.<noun>.<state>`` convention (§2.1).
-# Prefix kept ``core.`` (preview is Core-produced, rides Core's stream); the emitter
-# (Relay-publishes vs Core-emits) + prefix are the open RELAY+CORE reconciliation the
-# ruling flagged "before those chips finalize". Swappable behind the publisher seam.
-FAMILY_PREVIEW_AVAILABLE = "core.preview_available"
+# Q4 RESOLVED (STATUS_ARCH #128 / round 11): the preview-available event is
+# ``batch.status.preview_ready`` — the name Scout's reducer ACTUALLY keys on. Core's
+# grounded re-grep found ``*.preview_available`` exists NOWHERE in the Scout canon
+# (no-handwaving). ARCH ratified ``batch.status.preview_ready``; **Relay TRIGGERS
+# preview-ready, Scout consumes it** (the ``batch`` prefix is the 9th event slug,
+# KNOWN_EVENT_PREFIXES owned by Core/HB). Published via the seam onto Core's stream (Q15).
+FAMILY_PREVIEW_AVAILABLE = "batch.status.preview_ready"
 
 
 def _now_iso() -> str:
