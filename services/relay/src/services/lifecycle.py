@@ -51,7 +51,12 @@ FAMILY_FINALIZE_ACCEPTED = "relay.finalize.accepted"
 # now fetchable", scout_backend_simulator_events.py). Both ``core``/``relay``
 # prefixes are recognised by the 8-slug event gate (KNOWN_EVENT_PREFIXES,
 # owned by Core/HB).
-FAMILY_PREVIEW_AVAILABLE = "core.preview.available"
+# Q4 ruling (STATUS_ARCH): the contract event is ``*.preview_available`` (underscore
+# token) — AUTHORITATIVE over the SBS dotted ``core.<noun>.<state>`` convention (§2.1).
+# Prefix kept ``core.`` (preview is Core-produced, rides Core's stream); the emitter
+# (Relay-publishes vs Core-emits) + prefix are the open RELAY+CORE reconciliation the
+# ruling flagged "before those chips finalize". Swappable behind the publisher seam.
+FAMILY_PREVIEW_AVAILABLE = "core.preview_available"
 
 
 def _now_iso() -> str:
