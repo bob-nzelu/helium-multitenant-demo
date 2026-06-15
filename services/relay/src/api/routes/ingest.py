@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from ..caller_context import CallerContext
 from ..deps import authenticate_request, decrypt_body_if_needed
 from ..models import IngestResponse
+from ..version_drift import version_drift_guard
 from ...services.bulk import BulkService
 from ...services.external import ExternalService
 
@@ -63,11 +64,17 @@ def _coerce_finalize(value: object) -> Optional[bool]:
     "/api/ingest",
     response_model=IngestResponse,
     summary="Ingest files for processing",
+    # §B-Drift: version-drift gateway runs BEFORE the handler. On a stale
+    # version axis it raises 409 {code,axis,expected,got} and the request is
+    # NOT forwarded (no ingestion side effects). The guard shares the same
+    # authenticate_request dependency as the ``ctx`` handler param (FastAPI
+    # dedupes), so auth resolves once.
+    dependencies=[Depends(version_drift_guard)],
     responses={
         400: {"description": "Validation failed / Malware detected"},
         401: {"description": "Authentication failed"},
         403: {"description": "Encryption required"},
-        409: {"description": "Duplicate file"},
+        409: {"description": "Duplicate file / version drift"},
         429: {"description": "Rate limit exceeded"},
         503: {"description": "Module not loaded (external flow)"},
     },

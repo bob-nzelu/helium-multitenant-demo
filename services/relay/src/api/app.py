@@ -36,6 +36,7 @@ from ..services.finalize import FinalizeService
 from ..services.ingestion import IngestionService
 from ..services.lifecycle import CoreLifecyclePublisher
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
+from .version_drift import VersionDriftError, version_drift_error_handler
 from .routes.duplicate import router as duplicate_router
 from .routes.finalize import router as finalize_router
 from .routes.health import router as health_router
@@ -215,6 +216,9 @@ def create_app(
 
     # Error handlers
     app.add_exception_handler(RelayError, relay_error_handler)
+    # §B-Drift: version_drift 409 has a bespoke body shape (no RelayError
+    # wrapper) — rendered verbatim by its own handler.
+    app.add_exception_handler(VersionDriftError, version_drift_error_handler)
 
     # Routes
     app.include_router(health_router)
