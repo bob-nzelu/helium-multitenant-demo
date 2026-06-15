@@ -345,6 +345,97 @@ class HeartBeatClient(BaseClient):
 
         return await self.call_with_retries(_write)
 
+    # ── Blob Fetch (§B-RelayArtifactFetch) ─────────────────────────────────
+
+    async def fetch_blob(
+        self,
+        artifact_ref: str,
+        jwt_token: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch raw blob bytes from HeartBeat blob storage by reference.
+
+        BACKEND CONTRACT (CLAUDE.md "Backend Debt Notes" §B-RelayArtifactFetch +
+        debt-map L159-160): HeartBeat owns blob storage; Relay's artifact-fetch
+        route is a thin authenticated proxy to HB blob bytes for HARD artifacts
+        (signed / fixed / original / backend PDF, QR blob, signature). Relay
+        calls this with its OWN HB *service* credentials (HMAC s2s) — the
+        original ERP/user only holds the Relay ingest key, not HB-service creds
+        (mirrors the ``downstream_auth_header`` model in ``deps._verify_hmac``).
+
+        NEEDS-HB: HB must expose a **POST-body** blob-fetch-by-ref endpoint.
+        ``artifact_ref`` is a bearer capability — it MUST NOT travel in a URL
+        (consistent with HB's own audit M-1 "content identifier must not appear
+        in URLs/logs", already applied to dedup/config). Modelled here as
+        ``POST /api/blobs/fetch {blob_ref}`` returning the raw bytes with a
+        ``Content-Type`` header. The path/field shape is PROVISIONAL until HB
+        confirms (cross-seat NEEDS-HB); the Relay route is proven correct with
+        this method MOCKED in tests.
+
+        Args:
+            artifact_ref: Capability handle for the stored blob.
+            jwt_token: Optional user JWT to forward for attribution.
+
+        Returns:
+            ``{"content_type": str, "data": bytes}`` on a hit, or ``None`` on a
+            404 / empty miss (the route maps ``None`` → ARTIFACT_NOT_FOUND). The
+            ``content_type`` is the HB-reported MIME of the stored blob; the
+            route prefers the per-KIND Content-Type but falls back to this.
+
+        Raises:
+            HeartBeatUnavailableError: If HeartBeat is unreachable.
+            TransientError: If HeartBeat returns 5xx.
+        """
+        path = "/api/blobs/fetch"
+        body_bytes = self._json_bytes({"blob_ref": artifact_ref})
+
+        async def _fetch():
+            http = self._get_http()
+            headers = self._s2s_headers(
+                method="POST",
+                path=path,
+                body_bytes=body_bytes,
+            )
+            # Forward the user JWT for attribution when present; HB s2s HMAC
+            # still authenticates the Relay→HB hop itself.
+            if jwt_token:
+                headers["Authorization"] = f"Bearer {jwt_token}"
+
+            self._calls.append(("fetch_blob", artifact_ref))
+
+            try:
+                resp = await http.post(
+                    path,
+                    content=body_bytes,
+                    headers=headers,
+                )
+            except httpx.ConnectError as e:
+                raise HeartBeatUnavailableError(
+                    message=f"Cannot connect to HeartBeat for blob fetch: {e}"
+                ) from e
+
+            # A 404 from HB is a normal miss, not an error — the route maps it
+            # to the ARTIFACT_NOT_FOUND contract body.
+            if resp.status_code == 404:
+                return None
+
+            self._raise_for_status(resp, "fetch_blob")
+
+            data = resp.content
+            if not data:
+                return None
+            content_type = (
+                resp.headers.get("content-type") or "application/octet-stream"
+            )
+            logger.debug(
+                f"HeartBeat fetch_blob — ref={artifact_ref[:12]}..., "
+                f"bytes={len(data)}, content_type={content_type}",
+                extra={"trace_id": self.trace_id},
+            )
+            return {"content_type": content_type, "data": data}
+
+        return await self.call_with_retries(_fetch)
+
     # ── Deduplication ──────────────────────────────────────────────────────
 
     async def check_duplicate(self, file_hash: str) -> Dict[str, Any]:

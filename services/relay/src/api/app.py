@@ -36,6 +36,7 @@ from ..services.finalize import FinalizeService
 from ..services.ingestion import IngestionService
 from ..services.lifecycle import CoreLifecyclePublisher
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
+from .routes.artifacts import router as artifacts_router
 from .version_drift import VersionDriftError, version_drift_error_handler
 from .routes.duplicate import router as duplicate_router
 from .routes.finalize import router as finalize_router
@@ -227,5 +228,6 @@ def create_app(
     app.include_router(finalize_router)
     app.include_router(internal_router)
     app.include_router(duplicate_router)
+    app.include_router(artifacts_router)
 
     return app
