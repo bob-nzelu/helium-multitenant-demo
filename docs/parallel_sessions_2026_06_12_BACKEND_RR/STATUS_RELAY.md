@@ -333,3 +333,5 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   **Relay live-e2e still gated (NOT Relay code):** **A1 Redis** (production-blocking); **Core/HB backends behind Relay** (CoreClient/HeartBeatClient are stubs — finalize trigger, lifecycle/preview SSE echo, the 5 axis values, blob-fetch-by-ref); **Scout cutover** (SBS→real, SQLCipher). **OAuth #120** now prioritized (post-merge chip).
 
   Worktrees `rm3f`/`rm4f`/`previewf` removed (branches merged). Watcher 30-min active.
+
+- 2026-06-15, RR tick (idle ×2): no change — ARCH master still `464545a` (heads-down on Core EC2 verification); **no RELAY post-vet / no #28 ratification / no OAuth #120 scheduling / no DRIFT**; demo `main` `1863d28` (§B pack intact). Gates unchanged (Redis A1 down; Core/HB stubs; Scout cutover pending). **Dropping to 60-min self-resume (§5.1)** — idle-blocked on ARCH/peers/infra; nothing in Relay's control until a gate clears. Will jump back to 30-min on any RELAY-naming verdict, #28 ratification, OAuth-HB landing, or gate-clear.
