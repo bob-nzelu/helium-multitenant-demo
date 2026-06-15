@@ -263,3 +263,50 @@ class CoreClient(BaseClient):
             return {"accepted": True, "family": family, "trace_id": trace}
 
         return await self.call_with_retries(_publish)
+
+    async def fetch_lifecycle_artifact(
+        self,
+        artifact_ref: str,
+        artifact_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch a LIFECYCLE artifact as raw JSON by reference (§B-RelayArtifactFetch).
+
+        BACKEND CONTRACT (CLAUDE.md "Backend Debt Notes" §B-RelayArtifactFetch +
+        debt-map L139-160): lifecycle artifacts (HLX, FIRS-returned artifact,
+        approval-lifecycle JSON, manifest) are owned by **Core**, not HB blob
+        storage. Relay's artifact-fetch route returns these as raw JSON to Scout
+        only (Reader never receives the raw JSON — Scout reduces it to
+        display-safe fields; ``raw_bytes_sent`` stays false to Reader).
+
+        NEEDS-CORE: Core must expose a **POST-body** lifecycle-JSON-by-ref
+        endpoint. ``artifact_ref`` is a bearer capability — it MUST NOT travel
+        in a URL (cf. the existing Core ``GET /api/invoices/<id>`` shape the
+        VERB_DELTA ruling flags for migration). Modelled here as
+        ``POST {core}/api/artifacts/lifecycle {artifact_ref, artifact_type}``
+        returning the JSON document. Phase-1 stub: returns ``None`` so the
+        route's miss path (ARTIFACT_NOT_FOUND) is the default until Core wires a
+        real store; route correctness is proven with this method MOCKED.
+
+        Args:
+            artifact_ref: Capability handle for the lifecycle artifact.
+            artifact_type: Optional explicit kind (hlx / firs_returned_artifact
+                / approval_lifecycle_json / manifest) forwarded to Core.
+
+        Returns:
+            The lifecycle JSON document (a dict) on a hit, or ``None`` on a miss
+            (the route maps ``None`` → ARTIFACT_NOT_FOUND).
+        """
+        async def _fetch():
+            # Phase 1 stub — no Core lifecycle store wired yet (NEEDS-CORE).
+            # Returns None so the route resolves to ARTIFACT_NOT_FOUND; tests
+            # mock this method to exercise the JSON hit path.
+            logger.debug(
+                "Core fetch_lifecycle_artifact (stub) — ref=%s type=%s",
+                artifact_ref[:16],
+                artifact_type or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            return None
+
+        return await self.call_with_retries(_fetch)

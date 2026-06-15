@@ -295,6 +295,39 @@ class QueueNotFoundError(RelayError):
         )
 
 
+class ArtifactNotFoundError(RelayError):
+    """
+    Artifact referenced by ``artifact_ref`` is not resolvable (§B-RelayArtifactFetch).
+
+    Per CLAUDE.md "Backend Debt Notes" §B-RelayArtifactFetch + the debt-map
+    (READER_RELAY_INTEGRATION_DEBT_MAP_2026_06_12.md L155-157), a miss on the
+    artifact-fetch route returns HTTP 404 with the EXACT body
+    ``{"code": "ARTIFACT_NOT_FOUND", "artifact_ref": <ref>}`` — NO
+    ``status`` / ``error_code`` / ``message`` / ``details`` envelope. This
+    mirrors the SBS executable spec (``relay_fetch_artifact`` relay.py:1039/1052
+    + ``fetch_blob_from_sbs`` core.py:122). ``to_dict`` is overridden so the
+    global ``relay_error_handler`` emits that contract shape verbatim rather
+    than the generic Relay error envelope.
+
+    ``artifact_ref`` is a bearer-capability handle: it is echoed in the body
+    (the request already carried it) but MUST NOT be placed in a URL / path /
+    proxy log (VERB_DELTA, §B-RelayArtifactFetch). The miss path here is
+    body-only, consistent with that rule.
+    """
+
+    def __init__(self, artifact_ref: str):
+        super().__init__(
+            error_code="ARTIFACT_NOT_FOUND",
+            message="Artifact not found.",
+            status_code=404,
+        )
+        self.artifact_ref = artifact_ref
+
+    def to_dict(self) -> Dict[str, Any]:
+        # Contract body shape — intentionally NOT the generic Relay envelope.
+        return {"code": self.error_code, "artifact_ref": self.artifact_ref}
+
+
 # ── Duplicate (409) ───────────────────────────────────────────────────────
 
 
