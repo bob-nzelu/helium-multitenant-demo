@@ -26,12 +26,13 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ..caller_context import CallerContext
 from ..deps import authenticate_request
 from ..models import FinalizeResponse
+from ..version_drift import version_drift_guard
 from ...errors import ValidationFailedError
 from ...services.finalize import FinalizeService
 
@@ -70,11 +71,17 @@ async def _read_finalize_body(request: Request) -> dict:
 @router.post(
     "/api/finalize",
     summary="Finalize an already-ingested doc by reference (#3, no bytes)",
+    # §B-Drift: version-drift gateway runs BEFORE the handler body. On a stale
+    # version axis it raises 409 {code,axis,expected,got} and the fiscalize is
+    # NOT forwarded. The guard depends on authenticate_request; the handler
+    # re-resolves auth internally (idempotent: HMAC recompute / cached
+    # introspect) since it intentionally does not take ``ctx`` as a parameter.
+    dependencies=[Depends(version_drift_guard)],
     responses={
         202: {"description": "Finalize accepted"},
         400: {"description": "Missing reference / invalid body"},
         401: {"description": "Authentication failed"},
-        409: {"description": "Already finalized (treat as success, idempotent)"},
+        409: {"description": "Already finalized (idempotent) / version drift"},
         429: {"description": "Rate limit exceeded"},
     },
 )
