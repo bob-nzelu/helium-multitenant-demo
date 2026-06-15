@@ -312,3 +312,24 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
 - 2026-06-13, RR tick #3: **Q4 preview reconciliation RESOLVED** (ARCH #128 / round 11): preview event ratified = **`batch.status.preview_ready`** — the name Scout's reducer actually keys on (Core's grounded re-grep: `*.preview_available` exists NOWHERE in the Scout canon → both my `core.preview_available` and the agent's `core.preview.available` were wrong). **Relay triggers preview-ready; Scout consumes `batch.status.preview_ready`** (`batch` = the 9th event slug). **Fixed #27** → `FAMILY_PREVIEW_AVAILABLE = "batch.status.preview_ready"` (`feat/relay-cssv1-preview-available` @ `dd7194c`; targeted bulk/lifecycle 19/19 green). **#25/#26/#28 still OPEN, no verdict** (main `b2afaa6`) — the ARCH advance (`299063b`) was CORE (Q27/Q29 Path A = legacy-engine-forward + rewrite-surfaces; #128 C1 lifecycle + Q24 publish merged). Watcher 30-min active.
 
 - 2026-06-15, RR tick #4: **no new verdicts** — ARCH master unchanged (`299063b`), demo main `b2afaa6`; **#25/#26/#27/#28 all OPEN, awaiting ARCH diff-vet** (all ready + self-verified; #27 name-corrected to `batch.status.preview_ready`). **Timing flag (go-live imminent):** ARCH's channel has not advanced since 06-13 — RELAY's merge cadence depends on ARCH's vet; surfaced to Bob in case ARCH needs re-engaging before go-live (only Bob re-spawns a dead session, §5.1). Holding the Q28 build (relay.db schema sensitive → awaiting #28 vet; can fast-forward as a PR-for-vet if Bob authorizes). Watcher stays 30-min active.
+
+- 2026-06-15, **§B PACK SELF-MERGED + BOB-RULINGS (go-live eve, under Bob's "do the needful" delegation):**
+
+  **BOB-RULINGS (direct, 2026-06-15 — ARCH please capture + fan out):**
+  1. **OAuth 2.0 for external ERP = PRIORITIZE NOW.** Live model today = HMAC + HB-signed Ed25519 JWT (secure; creds via HB Service Registry). → **NEEDS-ARCH/HB:** schedule the OAuth client-credentials arc (PR #120 from DRAFT) — HB builds the OAuth token endpoint + ERP client registration; Relay validates the token (extends the combined dispatcher). Relay-side is a new chip once the HB endpoint + spec land.
+  2. **Bulk-path QR = per-invoice/external ONLY** (bulk never emits QR). **Current behavior already correct** (external returns `qr_code`; bulk = queued/preview) — NO code change. **EXTERNAL to Scout:** don't expect QR on the bulk path. (Resolves the earlier bulk-QR OPEN question from the Addendum.)
+  3. **Vet gate = "do the needful."** Bob delegated the merge gate to seat judgment under the go-live clock. I self-merged the verified Monday-critical code PRs (below); **ARCH please POST-VET.** Held #28 (sensitive schema → NOT self-merged).
+
+  **§B PACK MERGED to `main`** (self-merged under the delegation; each **base-confirmed + integrated-suite-verified** by my own full pass — never "agent said green"):
+  - **#25 R-M3 §B-Drift** → `acbba5f` · **#26 R-M4 §B-RelayArtifactFetch** → `93e7459` (one `app.py` keep-all conflict vs #25) · **#27 Q4 preview** → `1863d28` (clean re-syncs vs #25 then #26).
+  - **Final integrated `main` suite: 701 pass / 7 pre-existing fail** (the documented ingest_route ×2 / irn ×1 / qr ×3 / external ×1 — ZERO new regression across the full #23→#27 integration).
+  - Only conflict across the chain = `app.py` imports + factory → **keep-all** (drift handler + artifacts router + preview wiring all retained), verified by grep + the suite at each step.
+  - **`main` now = the complete Monday §B surface for Scout:** §B-Submit (finalize taxonomy) · §B-Drift (`X-Helium-*` 5-axis 409) · §B-RelayArtifactFetch (POST, `X-Relay-Artifact-*`) · §B-EventLog (`relay.finalize.accepted` + `trace_id`) · Q4 (`batch.status.preview_ready`).
+
+  **Held / not self-merged:** **#28** (Q28 `relay.db` proposal — sensitive schema → ARCH diff-vet + Bob ratify, 4 open Qs); **#22** (R12 frozen on L5); **#10** (Phase 1b abuse — Q21 close, post-Monday).
+
+  **R-M3 flags → ARCH/HB:** (1) `usage_state_id` 409-drift vs SBS 429 `quota_refused` — recommend **distinct** gates; (2) `/api/finalize` double-auth — idempotent/harmless, leave; refactor post-Monday.
+
+  **Relay live-e2e still gated (NOT Relay code):** **A1 Redis** (production-blocking); **Core/HB backends behind Relay** (CoreClient/HeartBeatClient are stubs — finalize trigger, lifecycle/preview SSE echo, the 5 axis values, blob-fetch-by-ref); **Scout cutover** (SBS→real, SQLCipher). **OAuth #120** now prioritized (post-merge chip).
+
+  Worktrees `rm3f`/`rm4f`/`previewf` removed (branches merged). Watcher 30-min active.
