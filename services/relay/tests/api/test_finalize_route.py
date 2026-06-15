@@ -245,9 +245,11 @@ class TestIngestFinalizeAxis:
 
     We assert routing via the response *shape*: the external (#2, finalize=true)
     path returns irn+qr_code; the bulk (#1, finalize=false) path returns
-    preview_data and never irn. Multipart bodies can't be HMAC-signed in these
-    tests (same constraint as test_ingest_route.py), so we drive the router via
-    a JWT-introspect monkeypatch to reach the handler with a real CallerContext.
+    status="queued" and never irn/qr_code (Q4: the bulk preview is no longer
+    inline — it arrives via the core.preview.available lifecycle event).
+    Multipart bodies can't be HMAC-signed in these tests (same constraint as
+    test_ingest_route.py), so we drive the router via a JWT-introspect
+    monkeypatch to reach the handler with a real CallerContext.
     """
 
     @staticmethod
@@ -287,7 +289,8 @@ class TestIngestFinalizeAxis:
         # finalize=true overrode call_type=bulk → external path → irn+qr present.
         assert data["irn"] is not None
         assert data["qr_code"] is not None
-        assert data.get("preview_data") is None
+        # preview_data was removed from the response model entirely (Q4).
+        assert "preview_data" not in data
 
     @pytest.mark.asyncio
     async def test_finalize_false_routes_bulk_preview(
@@ -306,6 +309,9 @@ class TestIngestFinalizeAxis:
                 )
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        # finalize=false overrode call_type=external → bulk path → no irn, preview present.
+        # finalize=false overrode call_type=external → bulk path. Bulk now
+        # returns status="queued" with no irn/qr and no inline preview (Q4).
         assert data["irn"] is None
-        assert data["preview_data"] is not None
+        assert data["qr_code"] is None
+        assert data["status"] == "queued"
+        assert "preview_data" not in data

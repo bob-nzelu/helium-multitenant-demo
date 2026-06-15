@@ -1,14 +1,16 @@
 """
 Lifecycle event publisher seam (R-M2 / §B-EventLog).
 
-Relay emits a small slice of ``relay.*`` lifecycle events — for Monday, just
+Relay emits a small slice of lifecycle events — for Monday:
 ``relay.finalize.accepted`` (§B-Submit / SBS ``simulate_finalize``,
-scout_backend_simulator.py:1567-1581). The contract MUST is the **trace_id
-echo**: a non-empty ``trace_id`` supplied by the client is carried onto the
-lifecycle event so the downstream SSE that confirms the action echoes it back
-(events SBS ``_build_sse_frame`` lifts ``data.trace_id`` to top-level
-``frame["trace_id"]``, events.py:530-532). Scout's reducer keys the optimistic
-row off that ``trace_id``.
+scout_backend_simulator.py:1567-1581) and ``core.preview.available`` (Q4 — the
+bulk ingest path no longer blocks on / returns Core's preview inline; it emits
+this event when the preview becomes available so Scout reacts asynchronously).
+The contract MUST is the **trace_id echo**: a non-empty ``trace_id`` supplied
+by the client is carried onto the lifecycle event so the downstream SSE that
+confirms the action echoes it back (events SBS ``_build_sse_frame`` lifts
+``data.trace_id`` to top-level ``frame["trace_id"]``, events.py:530-532).
+Scout's reducer keys the optimistic / batch row off that ``trace_id``.
 
 Topology note (ARCH Open Q15 unresolved — see debt-map §B-EventLog):
 - Relay does **NOT** host an SSE server. Scout connects to **Core's** SSE
@@ -35,8 +37,27 @@ from typing import Any, Dict, Optional, Protocol, runtime_checkable
 logger = logging.getLogger(__name__)
 
 
-# Family constants — single source of truth for the relay.* slice Relay owns.
+# Family constants — single source of truth for the lifecycle slice Relay emits.
+#
+# Relay-originated finalize confirmation (§B-Submit). ``relay.*`` prefix.
 FAMILY_FINALIZE_ACCEPTED = "relay.finalize.accepted"
+#
+# Bulk-preview readiness (Q4). ``core.*`` prefix because the preview itself is
+# produced by Core and the event rides **Core's** stream (Q15 two-stream).
+# Relay merely *publishes* the trigger frame via the CoreClient seam — same
+# topology as ``relay.finalize.accepted``. The plain handle in the ARCH ruling
+# is "preview_available"; the wire family follows the SBS ``core.<noun>.<state>``
+# shape (cf. ``core.submission.<status>`` / ``hlx.available`` for "an output is
+# now fetchable", scout_backend_simulator_events.py). Both ``core``/``relay``
+# prefixes are recognised by the 8-slug event gate (KNOWN_EVENT_PREFIXES,
+# owned by Core/HB).
+# Q4 RESOLVED (STATUS_ARCH #128 / round 11): the preview-available event is
+# ``batch.status.preview_ready`` — the name Scout's reducer ACTUALLY keys on. Core's
+# grounded re-grep found ``*.preview_available`` exists NOWHERE in the Scout canon
+# (no-handwaving). ARCH ratified ``batch.status.preview_ready``; **Relay TRIGGERS
+# preview-ready, Scout consumes it** (the ``batch`` prefix is the 9th event slug,
+# KNOWN_EVENT_PREFIXES owned by Core/HB). Published via the seam onto Core's stream (Q15).
+FAMILY_PREVIEW_AVAILABLE = "batch.status.preview_ready"
 
 
 def _now_iso() -> str:

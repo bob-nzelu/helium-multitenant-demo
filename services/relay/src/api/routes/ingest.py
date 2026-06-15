@@ -91,8 +91,9 @@ async def ingest(
     Ingest files for invoice processing.
 
     **call_type=bulk** (Float desktop):
-        Runs ingestion → waits for Core preview (up to 5 min).
-        Returns preview_data if processed, or status="queued".
+        Runs ingestion → returns promptly with status="queued" (accepted).
+        Core's preview is delivered asynchronously via the
+        ``core.preview.available`` lifecycle event (NOT inline). No block.
 
     **call_type=external** (API callers):
         Runs ingestion → fire-and-forget Core → generates IRN+QR.
@@ -213,7 +214,9 @@ async def ingest(
         )
 
     else:
-        # Bulk flow (default): ingest → preview
+        # Bulk flow (default): ingest → return promptly (queued). Core's preview
+        # is delivered asynchronously via the core.preview.available lifecycle
+        # event (Q4) — NOT inline on this response. No more up-to-5-min block.
         bulk_svc: BulkService = request.app.state.bulk_service
         result = await bulk_svc.process(
             files=file_tuples,
@@ -232,5 +235,4 @@ async def ingest(
             file_uuids=result.ingest.blob_uuids,
             file_hashes=result.ingest.file_hashes,
             trace_id=trace_id,
-            preview_data=result.preview_data,
         )
