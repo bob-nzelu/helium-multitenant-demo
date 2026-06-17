@@ -2,7 +2,7 @@
 
 **Owner:** Relay
 **Status:** DRAFT — pending Bob review
-**Date:** 2026-05-10
+**Date:** 2026-05-10 (rev. 2026-06-17 — external path HMAC→OAuth, see §14)
 **Repo:** `helium-multitenant-demo`
 **Doc location:** `services/relay/Documentation/FRONTDOOR_ARCHITECTURE.md`
 **Supersedes:** the forward-looking §5 in `helium-services-phase3/HeartBeat/Documentation/RELAY_PHASE1_DESIGN_ALIGNMENT_2026_05_09.md` (HB-side stub) and the §5.4 Phase 2+ pointer in `RELAY_ARCH_HANDOFF_CSSV1_2026_05_10.md`. Those references will redirect here once this lands on master.
@@ -100,55 +100,76 @@ This lock is referenced in:
 
 ## §3. Path A — HTTP write-first (Phase 2 primary)
 
-Path A is the **primary Phase 2 ingress**: ERP integrations call Relay over HTTPS with the §3.3 ERP HMAC headers, Relay durably enqueues, and ACKs. The processing pipeline runs asynchronously off the queue.
+Path A is the **primary Phase 2 ingress**: ERP integrations call Relay over HTTPS with an **OAuth 2.0 bearer token** (`aud=helium.relay-ingest`), Relay durably enqueues, and ACKs. The processing pipeline runs asynchronously off the queue.
+
+> **Auth model — OAuth-first for external ERPs.** External ingestion authenticates with **OAuth 2.0 `client_credentials`** against HeartBeat, not HMAC. The ERP exchanges its `client_id` / `client_secret` for a short-lived EdDSA JWT at HeartBeat's `POST /api/auth/oauth/token`, then presents that JWT to Relay as `Authorization: Bearer <jwt>`. Relay validates the token **locally** against cached JWKS (`GET /.well-known/jwks.json`) — no per-request HeartBeat round-trip. There is **no HMAC interim** for external ERPs: no external traffic flows until OAuth (HeartBeat O1–O4 + Relay Gap #2) is live, so there is nothing for an interim to bridge. The 3-header HMAC path (`X-API-Key` / `X-Timestamp` / `X-Signature`) remains in the code for **internal / legacy service callers only** and is not part of the external contract. (Authoritative: `EXTERNAL_INGESTION_ALIGNMENT_2026_06_15.md`, `EXTERNAL_SERVICE_OAUTH_SPEC.md`.)
 
 ### §3.1 The wire
 
 ```
 ERP  ──── HTTPS POST /api/ingest ────►  Relay
-         X-API-Key: <tenant ERP key>
-         X-Timestamp: <ISO 8601 UTC>
-         X-Signature: <HMAC-SHA256(secret, "{api_key}:{timestamp}:{sha256(body)}")>
-         Body: <invoice payload, JSON or NaCl-encrypted envelope>
+         Authorization: Bearer <EdDSA JWT, aud=helium.relay-ingest, scope=invoice:submit>
+         Content-Type: multipart/form-data
+         Body: batch_id=<caller batch ref>
+               files=<.json file: array of N invoice records>
 ```
 
-The combined auth dispatcher in `services/relay/src/api/deps.py::authenticate_request` (shipped in PR #9, hardened in PR #17) branches on header presence:
-- HMAC headers (`X-API-Key` + `X-Timestamp` + `X-Signature` all present) → ERP path (this section).
-- `Authorization: Bearer <jwt>` → frontend path (out of scope for Frontdoor).
+The JWT is obtained beforehand from HeartBeat:
+
+```
+ERP  ──── HTTPS POST /api/auth/oauth/token ────►  HeartBeat
+         Content-Type: application/x-www-form-urlencoded
+         grant_type=client_credentials
+         client_id=<tenant ERP client>
+         client_secret=<tenant ERP secret>
+         scope=invoice:submit
+
+         ◄──── { "access_token": "<EdDSA JWT>", "token_type": "Bearer",
+                 "expires_in": 900, "scope": "invoice:submit" }
+```
+
+The combined auth dispatcher in `services/relay/src/api/deps.py::authenticate_request` branches on credential presence:
+- `Authorization: Bearer <jwt>` with `aud=helium.relay-ingest` → **external ERP OAuth path** (this section) — validated locally via cached JWKS (Gap #2).
+- `Authorization: Bearer <jwt>` with `aud=helium.frontend` → frontend user path (HB `/introspect`; out of scope for Frontdoor).
+- HMAC headers (`X-API-Key` + `X-Timestamp` + `X-Signature`) → internal/legacy service path only (not the external contract).
 - `Authorization: Bearer <api_key>:<api_secret>` → service-to-service path (out of scope for Frontdoor).
 
 ### §3.2 Write-first ordering (the "write-first" lock)
 
-Once HMAC verification passes, Relay's `/api/ingest` handler runs in this order — **the queue write happens before any pipeline work**:
+Once OAuth token verification passes, Relay's `/api/ingest` handler runs in this order — **the queue write happens before any pipeline work**:
 
-1. Verify HMAC (§3.3 headers, body-bytes discipline).
-2. Verify timestamp window (5 min default per `core/auth.py::TIMESTAMP_WINDOW_S`).
-3. Resolve tenant from API key registry.
-4. (Optional, if `X-Encrypted: true`) decrypt NaCl envelope.
-5. Read `message_id` from the request body. *Reject 400 if missing — this is the durable idempotency key.*
-6. **Write the message envelope to `relay_queue`** (publish + publisher confirms).
-7. **Insert a `relay.db` row** with `received_at = now`, `processed_at = NULL`, `result = NULL`. (Order with step 6 is "queue write commits, then DB insert" — see §3.4.)
-8. Return **202 Accepted** to the ERP with a small body containing the `message_id` and `received_at`.
+1. Validate the bearer JWT locally (`aud=helium.relay-ingest`, `exp` within skew, `kid` resolves against cached JWKS, `jti` not in the Redis blocklist — see Gap #2 / §8).
+2. Resolve tenant from the JWT's `tenant_id` claim.
+3. Parse the multipart body: read `batch_id` (auto-generate `BATCH{YYYYMMDDHHMMSS}` if absent) and the uploaded `.json` file (a JSON array of N invoice records).
+4. Read `message_id` (per-record `transaction_id`) from each record. *A record missing its `transaction_id` lands in `failed[]` — it is the durable idempotency key.*
+5. **Write the message envelope to `relay_queue`** (publish + publisher confirms).
+6. **Insert a `relay.db` row** with `received_at = now`, `processed_at = NULL`, `result = NULL`. (Order with step 5 is "queue write commits, then DB insert" — see §3.4.)
+7. Return **202 Accepted** to the ERP with a small body containing the `message_id` and `received_at`.
 
 The 202 is the contract to the ERP: *"We have it durably; you do not need to retry."*
 
 The pipeline (§5) runs in a separate consumer task, independent of the request lifecycle.
 
-### §3.3 ERP HMAC headers — current shape
+### §3.3 ERP OAuth bearer token — external shape
 
-The current shipped contract (`services/relay/src/core/auth.py`, lines 92-111):
+External ERP authentication is an **OAuth 2.0 `client_credentials`** bearer JWT, minted by HeartBeat and validated locally by Relay against cached JWKS. There are no per-request signing headers; the single `Authorization` header carries the whole credential.
 
-| Header | Format | Purpose |
+| Element | Value | Purpose |
 |---|---|---|
-| `X-API-Key` | Opaque tenant ERP key (e.g., `erp_abbey_001`) | Identifies the ERP integration; resolves tenant + secret |
-| `X-Timestamp` | ISO 8601 UTC, `Z` suffix (e.g., `2026-01-31T10:00:00Z`) | 5-minute validity window; constant-time NTP-bound clock check |
-| `X-Signature` | Hex-encoded HMAC-SHA256 over `"{api_key}:{timestamp}:{sha256(body)}"` | Body-bytes discipline; covers the encrypted envelope when `X-Encrypted: true` |
+| `Authorization` | `Bearer <EdDSA JWT>` | The minted access token from HeartBeat's `/api/auth/oauth/token` |
+| JWT `aud` | `helium.relay-ingest` | Routes the token to Relay's local JWKS validator (not HB `/introspect`) |
+| JWT `scope` | `invoice:submit` | Authorizes the ingest operation |
+| JWT `tenant_id` | tenant slug | Resolves the tenant; replaces the HMAC API-key registry lookup |
+| JWT `exp` | issued + `900s` | 15-minute token lifetime; validated with a 60s clock-skew allowance |
+| JWT `kid` (header) | active signing key id | Selects the public key from `GET /.well-known/jwks.json` (cached 1h) |
+| JWT `jti` | unique token id | Optional Redis blocklist check for revocation (fail-open if Redis down) |
 
-There is **no `X-Nonce` header in the current shipped shape**. Replay protection today relies on:
-- The 5-minute timestamp window (limits the replay window).
-- ERP-supplied `message_id` checked against `relay.db` (catches replay within and across the window).
+**Replay protection** under OAuth rests on three layers, none of which is a nonce header:
+- Short token lifetime (`exp` 900s) bounds the replay window for a stolen token.
+- Per-record `transaction_id` checked against `relay.db` catches duplicate business events within and across the window (the durable idempotency key).
+- Optional `jti` blocklist supports explicit token revocation.
 
-Adding `X-Nonce` (with Redis SETNX dedup against the nonce, separate from `message_id`) is a known hardening — flagged as Q-Nonce in §12.
+> **HMAC is internal/legacy only.** The 3-header HMAC contract (`X-API-Key` / `X-Timestamp` / `X-Signature`, `HMAC-SHA256(secret, "{api_key}:{timestamp}:{sha256(body)}")`, 5-min window) is still implemented in `services/relay/src/core/auth.py` and still serves internal / legacy service callers, but it is **not** the external ERP contract and is not taught in the integrator documentation. The former `X-Nonce` hardening question (old Q-Nonce) is moot for the external path — OAuth's short-lived signed token supersedes it.
 
 ### §3.4 Queue-write-then-DB-row ordering
 
@@ -176,7 +197,7 @@ Why this order? The queue is the system-of-record for "did the message land?" Th
     │                          │                   │                │                  │
     │ POST /api/ingest         │                   │                │                  │
     │─────────────────────────►│                   │                │                  │
-    │                          │ auth (HMAC)       │                │                  │
+    │                          │ auth (OAuth/JWKS) │                │                  │
     │                          │───┐               │                │                  │
     │                          │◄──┘               │                │                  │
     │                          │ publish (msg_id)  │                │                  │
@@ -201,11 +222,14 @@ Why this order? The queue is the system-of-record for "did the message land?" Th
 
 | Item | Phase 2 (primary) | Notes |
 |---|---|---|
-| HTTP `/api/ingest` with HMAC auth | ✅ ALREADY SHIPPED | Live on EC2; auth dispatcher per `deps.py::authenticate_request` |
+| HTTP `/api/ingest` (synchronous) | ✅ ALREADY SHIPPED | Live on EC2; auth dispatcher per `deps.py::authenticate_request` |
+| OAuth bearer (`aud=helium.relay-ingest`) external auth | NOT YET BUILT | Relay Gap #2 (local JWKS validation) gated on HeartBeat O1–O4 (`/oauth/token` + JWKS). External traffic flows only when both land. |
+| Batch JSON-array ingest (`processed[]/duplicates[]/failed[]`) | NOT YET BUILT | Q37 Gap #3/#4/#7/#8 — per-record IRN+QR, VAT auto-compute, tenant `firs_service_id`. |
+| `POST /api/status` | NOT YET BUILT | Q37 Gap #5 — HB blob-status + Core invoice-status orchestration. |
 | Write-first to `relay_queue` | NOT YET BUILT | Phase 2 chip. Today's `/api/ingest` is synchronous all the way through (§10). |
 | `relay.db` schema + writer | NOT YET BUILT | Phase 2 chip. Schema proposed in §6. |
 | `relay_queue` consumer | NOT YET BUILT | Phase 2 chip. Drains queue, runs §5 pipeline, ACKs. |
-| Combined auth dispatcher | ✅ ALREADY SHIPPED | PR #9; hardened in PR #17. |
+| Combined auth dispatcher | ✅ ALREADY SHIPPED | PR #9; hardened in PR #17. OAuth `aud`-routing branch added by Gap #2. |
 
 ---
 
@@ -478,9 +502,9 @@ This is the canonical reference table for Frontdoor security layers, indexed by 
 | Layer | Path A (HTTP) | Path B (AMQP) |
 |---|---|---|
 | **Network auth** | TLS to Relay's HTTPS endpoint (TLS 1.2+; HSTS preferred) | mTLS at the broker — per-tenant client cert (Helium-issued, rooted at Helium CA) |
-| **Application auth** | §3.3 ERP HMAC headers (`X-API-Key` + `X-Timestamp` + `X-Signature`); body-bytes discipline | Signed envelope (HMAC over canonical body + timestamp + `message_id`); broker-level vhost ACL is the first gate |
-| **Tenant isolation** | tenant resolved from API key registry (`tenants.json` → `Tenant` dataclass → `tenant_id`) | tenant resolved from per-tenant vhost (broker-enforced; tenant cannot publish to another tenant's vhost) |
-| **Replay protection** | 5-min timestamp window + ERP-supplied `message_id` checked against `relay.db` (no nonce in current shape — see Q-Nonce §12) | `message_id` in `relay.db` (signed envelope provides the timestamp; same window applies) |
+| **Application auth** | OAuth 2.0 bearer JWT (`aud=helium.relay-ingest`, `scope=invoice:submit`), EdDSA-signed by HB, **validated locally** against cached JWKS (Gap #2). (HMAC headers remain for internal/legacy callers only.) | Signed envelope (HMAC over canonical body + timestamp + `message_id`); broker-level vhost ACL is the first gate |
+| **Tenant isolation** | tenant resolved from the JWT `tenant_id` claim (OAuth); validated against the tenant registry | tenant resolved from per-tenant vhost (broker-enforced; tenant cannot publish to another tenant's vhost) |
+| **Replay protection** | Short token lifetime (`exp` 900s) + per-record `transaction_id` checked against `relay.db` + optional `jti` Redis blocklist for revocation | `message_id` in `relay.db` (signed envelope provides the timestamp; same window applies) |
 | **Encryption at rest in transit** | NaCl X25519+XSalsa20-Poly1305 via `X-Encrypted: true` (optional; per `core/auth.py` doc) | TLS to broker; payload-level encryption can be layered if tenant requires |
 | **Quota / rate limit** | Same Redis daily-counter (per-tenant key, per-day TTL); fallback to HB `/api/daily_usage/check` | Same Redis daily-counter; same fallback |
 | **DLQ** | After N retries on the same `message_id`, move to `relay_queue.dlq` for human review | Same |
@@ -535,7 +559,8 @@ Surfaced as Q-CertRotation in §12: where does the cert-rotation operator UI liv
 
 | Phase | What ships | What does not | Status |
 |---|---|---|---|
-| **Phase 1 (current — CSSV1 cycle)** | Today's `/api/ingest` synchronous handler. ERP HMAC auth (§3.3). Synchronous HB D2 + Core E1 calls. **No queue. No `relay.db`.** | Path A write-first, Path B, `relay.db`, `relay_queue` consumer | Live on EC2; demo + early-customer scope |
+| **Phase 1 (current — CSSV1 cycle)** | Today's `/api/ingest` synchronous handler. Internal/legacy HMAC auth still wired (§3.3). Synchronous HB D2 + Core E1 calls. **No queue. No `relay.db`. No external OAuth yet** (gated on HB O1–O4 + Relay Gap #2). | External OAuth ingest, batch JSON-array, `POST /api/status`, Path A write-first, Path B, `relay.db`, `relay_queue` consumer | Live on EC2; demo + early-customer scope |
+| **Q37 external ingestion (in flight)** | OAuth bearer auth (Gap #2), batch JSON-array `/api/ingest` (Gap #3/#4/#7/#8), `POST /api/status` (Gap #5), AMQP consumer (Gap #6) — all additive on `feat/relay-external-ingestion-q37` | (gated) external OAuth traffic until HB O1–O4 ship | Building; ARCH-vetted before merge |
 | **Phase 2 (next)** | Path A — write-first HTTP → `relay_queue` write → 202 Accepted → consumer drains queue → §5 pipeline → `relay.db` records outcome | Path B (AMQP-direct) | Specified in this doc; chips not yet broken out |
 | **Phase 2+** | Path B §4.1 direct producer (mTLS + signed envelope). Most ERPs that do not want HTTP. | Path B §4.2 federation (waits for a real customer ask) | Forward-looking; built on demand |
 | **Phase 3** | Path B §4.2 federation — only when a real customer asks. | — | Demand-driven |
@@ -646,7 +671,8 @@ Honest list of what I cannot resolve in this session and what Bob's input would 
 
 ### §12.2 Auth shape questions
 
-- **Q-Nonce — should `X-Nonce` be a fourth HMAC header?** The current shipped shape is 3 headers (`X-API-Key` + `X-Timestamp` + `X-Signature`). The brief's §8 table referenced 4 headers (adding `X-Nonce`). Adding a nonce + Redis SETNX dedup tightens replay protection within the timestamp window — at the cost of a Redis dependency on every HMAC verify. I would defer this to a hardening chip; documentation should describe what we ship today, not what we plan. **Bob's call** on whether to ship it as part of Phase 2 or defer.
+- **Q-Nonce — RESOLVED / superseded by OAuth.** This question (whether to add `X-Nonce` as a 4th HMAC header) is moot for the external path. Per the 2026-06-15 external-ingestion alignment, external ERPs authenticate with **OAuth 2.0 bearer JWTs**, not HMAC. OAuth's short-lived signed token (`exp` 900s) + optional `jti` revocation blocklist supersede the nonce hardening. HMAC remains internal/legacy only and is not the external contract, so no nonce work is needed.
+- **Q-OAuth-Gate — external OAuth depends on HeartBeat O1–O4.** Relay's local JWKS validator (Gap #2) is built and wired, but external OAuth traffic physically cannot flow until HeartBeat ships `/api/auth/oauth/token` + `/.well-known/jwks.json` (O1–O4) and `RELAY_JWKS_URL` is configured. No HMAC interim is needed for external ERPs because no external traffic exists before OAuth is live.
 - **Q-AMQP-Envelope-Format — canonical signed envelope shape for Path B.** Phase 2+ work; not blocking. But the convergence pipeline (§5) relies on extracting `message_id` and `tenant_id` from the envelope — the format must be deterministic. Worth a sketch in this doc once Path B work begins.
 
 ### §12.3 Operational questions
@@ -664,7 +690,7 @@ Honest list of what I cannot resolve in this session and what Bob's input would 
 ### §12.5 Things the references contradict (worth flagging)
 
 - **PR attribution.** The brief (§3 of this doc's task brief) says the combined dispatcher is "already shipped in PR #17." Reality (from `git log` of `helium-multitenant-demo` on the docs branch): the dispatcher landed in **PR #9** (`2d791ac feat(relay): combined HMAC/JWT/service-creds auth dispatcher + HB introspect`). PR #17 (`fcf3086`) is the *defensive coding* hardening chip on top of the dispatcher. I wrote this doc reflecting the actual git history. Calling out so Bob is not surprised.
-- **HMAC header count.** As above (Q-Nonce). The brief says 4 headers; reality is 3.
+- **External auth model.** The external ERP contract is **OAuth 2.0**, not HMAC (per the 2026-06-15 alignment). The HMAC header count question (3 vs 4) only ever applied to the internal/legacy HMAC path, which is no longer the external story. See §3.3 and Q-Nonce (resolved).
 - **`relay.db` has not yet been built.** Multiple HB-side docs reference "the `relay.db` schema (when it ships)" — the schema in §6 is the proposal; nothing is built yet on the Relay side.
 
 ---
@@ -685,4 +711,10 @@ Honest list of what I cannot resolve in this session and what Bob's input would 
 
 ---
 
-**End of doc.** Next step: Bob review. Pending Bob's calls on Q-PK, Q-WAL, Q-Tamper, Q-DLQ, Q-Nonce, Q-Retention, this doc lands as the canonical Frontdoor reference and unblocks the Phase 2 Relay-side implementation chips.
+**End of doc.** Next step: Bob review. Pending Bob's calls on Q-PK, Q-WAL, Q-Tamper, Q-DLQ, Q-Retention (Q-Nonce resolved — superseded by OAuth), this doc lands as the canonical Frontdoor reference and unblocks the Phase 2 Relay-side implementation chips.
+
+---
+
+## §14. Revision — external ingestion OAuth cutover (2026-06-17)
+
+This doc was authored 2026-05-10 with the external path described as 3-header HMAC. Per the **2026-06-15 external-ingestion alignment** (ARCH, Q37), the external ERP contract is now **OAuth 2.0 `client_credentials`**. Sections rewritten in this revision: §3 (Path A wire + ordering + §3.3 auth shape + §3.6 ships table), §8 (security stack: application auth / tenant isolation / replay rows), §10 (phasing — Q37 row added), §12.2 (Q-Nonce resolved + Q-OAuth-Gate added), §12.5 (external auth-model note). The HMAC validator stays in code for internal/legacy callers; it is no longer part of the external integrator contract. Authoritative sources: `EXTERNAL_INGESTION_ALIGNMENT_2026_06_15.md`, `EXTERNAL_SERVICE_OAUTH_SPEC.md`, `PRONALYTICS_MIDDLEWARE_API.md`.
