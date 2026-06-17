@@ -395,3 +395,27 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   **Outstanding open Qs for ARCH (unchanged):** VAT formula confirm, `batch_id` field confirm, `firs_service_id` key-name confirm, `external_transaction_id` HB DDL path. These are non-blockers for the Relay-side build but needed before the PR can be merged + deployed.
 
   Watcher re-armed: 30-min active.
+
+- 2026-06-17, **Q37 BUILD COMPLETE — all 4 gaps landed + verified + PR #29 open for ARCH vet.** All four parallel agents finished. Commits on `feat/relay-external-ingestion-q37` (pushed to origin):
+
+  | Commit | Gap | What |
+  |--------|-----|------|
+  | `daf1870` | — | shared contract models (BatchIngestResponse + StatusResponse) |
+  | `7c1a52e` | #3/#4/#7/#8 | batch JSON-array ingest, per-invoice IRN+QR, VAT auto-7.5%, tenant `firs_service_id` injection (kills `A8BM72KQ`) |
+  | `65fe356` | #2 | local JWKS validation (`core/jwks_cache.py` + `core/oauth_validator.py` + `deps.py` aud-routing); EdDSA via cryptography; jti blocklist fail-open |
+  | `d547344` | #5 | `POST /api/status` — HB blob-status + Core invoice-status orchestration; graceful null Core (partial-now) |
+  | `9d9eb9a` | #6 | AMQP per-tenant consumer; reuses `BatchExternalService`; `/health` amqp status |
+
+  **Verification (seat-run full suite):** `828 passed, 7 failed`. All 7 failures **independently verified pre-existing** on fork base `1863d28` (stash-and-run in detached worktree): 2 ingest-route auth-ordering + 5 module-not-loaded (test_irn/test_qr/test_external `ModuleNotLoadedError`). **Zero regressions.** 127 new Q37 tests all pass (batch 37, status 44, oauth 26, amqp 20).
+
+  **Scope lock:** all 24 changed files under `services/relay/`. Confirmed.
+
+  **PRs open for ARCH:**
+  - **#29** — Q37 code build (4 gaps). Sensitive contracts → **ARCH vet, no self-merge**.
+  - **#19** (frontdoor doc) — pushed `63d179c`: §3/§8/§10/§12 rewritten HMAC→OAuth + §14 revision record. Doc-only.
+
+  **Gating (NOT blockers for vet):** Gap #2 OAuth dormant until HB O1–O4 (`/oauth/token`+JWKS) + `RELAY_JWKS_URL`; Gap #5 Core half (`get_invoice_status`) graceful-null stub until Core ships `external_transaction_id` lookup column.
+
+  **NEEDS FROM ARCH:** vet #29 + #19; confirm the 4 open Qs (VAT formula, `batch_id` additive field, `firs_service_id`=`TenantConfig.service_id`, `external_transaction_id` HB path); route BLOCKER B to HB (`events.batch.subscribe` slug); post-vet #25/#26/#27.
+
+  Watcher re-armed: 30-min active.
