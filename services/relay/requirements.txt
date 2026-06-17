@@ -33,3 +33,6 @@ uuid6>=2.0.0
 
 # Rate limiting (optional — graceful degradation when unavailable)
 redis[hiredis]>=5.0.0
+
+# AMQP ingestion consumer (Q37 Gap #6, optional — graceful degradation when not installed)
+aio-pika>=9.4.0

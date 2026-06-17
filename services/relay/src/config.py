@@ -84,6 +84,14 @@ class RelayConfig:
     # ── Multi-tenant (demo infrastructure) ──────────────────────────────
     tenants_file: str = ""                  # Path to tenants.json (empty = single-tenant mode)
 
+
+    # ── OAuth / JWKS (Q37 Gap #2) ────────────────────────────────────────────
+    # URL to HeartBeat's /.well-known/jwks.json (HB O3 endpoint).
+    # Empty = JWKS validation disabled; external OAuth Bearer tokens fall
+    # through to the existing introspect path unchanged.  Set
+    # RELAY_JWKS_URL once HB O3 ships.
+    jwks_url: str = ""
+
     # ── Malware scanning ──────────────────────────────────────────────────
     malware_scan_enabled: bool = False
     malware_clamd_socket: str = ""
@@ -91,6 +99,16 @@ class RelayConfig:
     malware_clamd_port: int = 3310
     malware_scan_timeout_s: int = 30
     malware_on_unavailable: str = "allow"  # "allow" | "block"
+
+    # ── AMQP ingestion consumer (optional — empty URL = disabled) ────────
+    # Set RELAY_AMQP_URL to enable per-tenant AMQP batch ingestion (Q37 Gap #6).
+    # When configured the consumer runs in the background alongside FastAPI.
+    # Relay starts normally when these are empty.
+    amqp_url: str = ""              # amqp://user:pass@host:5672/ (empty = disabled)
+    amqp_exchange: str = "helium.ingest"  # Per-tenant exchange name
+    amqp_queue: str = ""            # Per-tenant ingest queue (empty = use "relay.ingest")
+    amqp_reply_queue: str = ""      # Per-tenant reply queue (empty = use reply_to header)
+    amqp_routing_key: str = "ingest"  # Routing key for ingest messages
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -210,6 +228,11 @@ class RelayConfig:
         if v := env("TENANTS_FILE"):
             kwargs["tenants_file"] = v
 
+
+        # ── OAuth / JWKS
+        if v := env("JWKS_URL"):
+            kwargs["jwks_url"] = v
+
         # ── Malware scanning
         if v := env("MALWARE_SCAN_ENABLED"):
             kwargs["malware_scan_enabled"] = v.lower() in ("true", "1", "yes")
@@ -223,5 +246,17 @@ class RelayConfig:
             kwargs["malware_scan_timeout_s"] = int(v)
         if v := env("MALWARE_ON_UNAVAILABLE"):
             kwargs["malware_on_unavailable"] = v.lower()
+
+        # ── AMQP ingestion consumer
+        if v := env("AMQP_URL"):
+            kwargs["amqp_url"] = v
+        if v := env("AMQP_EXCHANGE"):
+            kwargs["amqp_exchange"] = v
+        if v := env("AMQP_QUEUE"):
+            kwargs["amqp_queue"] = v
+        if v := env("AMQP_REPLY_QUEUE"):
+            kwargs["amqp_reply_queue"] = v
+        if v := env("AMQP_ROUTING_KEY"):
+            kwargs["amqp_routing_key"] = v
 
         return cls(**kwargs)

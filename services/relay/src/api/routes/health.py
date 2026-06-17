@@ -33,6 +33,7 @@ async def health(request: Request):
     heartbeat = request.app.state.heartbeat
     module_cache = request.app.state.module_cache
     redis = request.app.state.redis
+    amqp_consumer = getattr(request.app.state, "amqp_consumer", None)
 
     # Check downstream services
     services = {}
@@ -58,6 +59,12 @@ async def health(request: Request):
     # Redis
     services["redis"] = "connected" if redis.is_available else "disconnected"
     # Redis disconnected is not degraded — graceful degradation by design
+
+    # AMQP consumer (Q37 Gap #6) — optional; never causes degraded status
+    if amqp_consumer is not None:
+        services["amqp"] = amqp_consumer.health_status
+    else:
+        services["amqp"] = "disabled"
 
     overall = "degraded" if degraded_reasons else "healthy"
     message = "; ".join(degraded_reasons) if degraded_reasons else None
