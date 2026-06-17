@@ -9,6 +9,100 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+# ── Q37 External Batch Ingest (PRONALYTICS_MIDDLEWARE_API §3) ─────────────────
+
+
+class BatchProcessedEntry(BaseModel):
+    """One successfully fiscalized invoice in a batch ingest response."""
+
+    transaction_id: str = Field(description="ERP's unique reference, echoed")
+    irn: str = Field(description="Invoice Reference Number (FIRS-recognised)")
+    qr_code: str = Field(description="QR code for this invoice, Base64-encoded")
+    data_uuid: str = Field(description="Relay internal storage handle")
+    fee_amount: float = Field(description="Echoed invoice amount in NGN")
+    vat_amount: float = Field(description="Echoed VAT in NGN (auto-computed at 7.5% if not supplied)")
+
+
+class BatchDuplicateEntry(BaseModel):
+    """A record already seen in a prior batch — not re-fiscalized."""
+
+    transaction_id: str
+    message: str = "Already received in a previous batch"
+    duplicate_of: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Original IRN, data_uuid, and batch_id of the first submission",
+    )
+
+
+class BatchFailedEntry(BaseModel):
+    """A record that could not be processed."""
+
+    transaction_id: str
+    error: str = Field(description="Human-readable failure reason")
+    error_code: Optional[str] = Field(default=None, description="Machine-readable code")
+
+
+class BatchSummary(BaseModel):
+    total: int
+    processed: int
+    duplicates: int
+    failed: int
+
+
+class BatchIngestResponse(BaseModel):
+    """Response from POST /api/ingest when processing a JSON array of ERP records.
+
+    Replaces the single-document IngestResponse for the external batch flow.
+    status: 'ok' (all processed) | 'partial' (some duplicates/failures) | 'rejected' (none processed).
+    """
+
+    status: str = Field(description="ok | partial | rejected")
+    batch_id: str = Field(description="Echo of the caller-supplied batch_id")
+    trace_id: str = Field(default="", description="Server correlation ID")
+    summary: BatchSummary
+    processed: List[BatchProcessedEntry] = Field(default_factory=list)
+    duplicates: List[BatchDuplicateEntry] = Field(default_factory=list)
+    failed: List[BatchFailedEntry] = Field(default_factory=list)
+
+
+# ── Q37 Status (PRONALYTICS_MIDDLEWARE_API §4) ────────────────────────────────
+
+
+class StatusRequest(BaseModel):
+    """Request body for POST /api/status. Exactly ONE selector must be provided."""
+
+    transaction_id: Optional[str] = Field(default=None, description="ERP transaction reference")
+    irn: Optional[str] = Field(default=None, description="Invoice Reference Number")
+    batch_id: Optional[str] = Field(default=None, description="Batch submission identifier")
+
+
+class StatusEntry(BaseModel):
+    """One invoice/transaction in a status response."""
+
+    transaction_id: Optional[str] = None
+    irn: Optional[str] = None
+    batch_id: Optional[str] = None
+    invoice_number: Optional[str] = Field(
+        default=None,
+        description="Tenant invoice number from Core invoices DB (null until Core lookup lands)",
+    )
+    result: str = Field(
+        description="Middleware outcome: processed | duplicate | failed | pending"
+    )
+    firs_status: Optional[str] = Field(
+        default=None,
+        description="Downstream FIRS lifecycle state (null until transmission begins)",
+    )
+    received_at: Optional[str] = None
+    processed_at: Optional[str] = None
+
+
+class StatusResponse(BaseModel):
+    """Response from POST /api/status."""
+
+    results: List[StatusEntry] = Field(default_factory=list)
+
+
 # ── Ingest Response ──────────────────────────────────────────────────────
 
 
