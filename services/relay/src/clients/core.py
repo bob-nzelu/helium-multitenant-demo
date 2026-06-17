@@ -233,6 +233,43 @@ class CoreClient(BaseClient):
 
         return await self.call_with_retries(_finalize_ref)
 
+    async def get_invoice_status(
+        self,
+        transaction_id: Optional[str],
+        irn: Optional[str],
+        tenant_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get invoice status from Core by transaction_id or IRN.
+
+        Returns None until Core builds the external_transaction_id lookup
+        column (Bob's ruling 2026-06-17). StatusService treats None as
+        graceful — HB-side data is still returned with firs_status=null
+        and invoice_number=null.
+
+        NEEDS-CORE: Gap #5 (Core half). When Core ships the lookup,
+        replace this stub with a real HMAC/JWT-forwarded POST.
+
+        Args:
+            transaction_id: ERP transaction reference (may be None).
+            irn: Invoice Reference Number (may be None).
+            tenant_id: Calling tenant.
+
+        Returns:
+            None — stub until Core builds the endpoint.
+        """
+        async def _get_status():
+            logger.debug(
+                "Core get_invoice_status (stub) — transaction_id=%s irn=%s",
+                transaction_id or "(none)",
+                (irn or "(none)")[:16],
+                extra={"trace_id": self.trace_id},
+            )
+            # Stub: Core gap #5 (Core half) not yet built.
+            return None
+
+        return await self.call_with_retries(_get_status)
+
     async def publish_lifecycle_event(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         """
         Forward a Relay-originated lifecycle event frame to Core's SSE stream.

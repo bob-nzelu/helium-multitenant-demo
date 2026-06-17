@@ -906,6 +906,71 @@ class HeartBeatClient(BaseClient):
 
         return await self.call_with_retries(_get_config)
 
+    # ── Blob Status (Q37 Gap #5) ───────────────────────────────────────────
+    #
+    # NEEDS-HB: HeartBeat does not yet expose a blob-status-by-selector
+    # endpoint. These stubs return empty/None so the StatusService can be
+    # wired end-to-end today. When HB ships the endpoint, replace the stub
+    # body with a real HMAC-signed POST (same pattern as fetch_config).
+    #
+    # Provisional endpoint shape (to be confirmed with HB seat):
+    #   POST /api/v1/heartbeat/blob/status
+    #   body: {selector: "batch_id" | "transaction_id" | "irn", value: str,
+    #          tenant_id: str}
+    #   response: {records: [{transaction_id, irn, batch_id, status,
+    #              received_at, processed_at, is_duplicate}, ...]}
+
+    async def get_blob_status_by_batch(
+        self, batch_id: str, tenant_id: str
+    ) -> List[Dict[str, Any]]:
+        """Fetch per-file blob status for a batch.
+
+        Returns [] if the batch is not found or HB endpoint not yet live.
+
+        NEEDS-HB: stub — replace with HMAC POST when HB ships the endpoint.
+        """
+        self._calls.append(("get_blob_status_by_batch", batch_id))
+        logger.debug(
+            "HeartBeat get_blob_status_by_batch (stub) — batch_id=%s",
+            batch_id,
+            extra={"trace_id": self.trace_id},
+        )
+        return []
+
+    async def get_blob_status_by_transaction_id(
+        self, transaction_id: str, tenant_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch blob status by external_transaction_id.
+
+        Returns None if not found or HB endpoint not yet live.
+
+        NEEDS-HB: stub — replace with HMAC POST when HB ships the endpoint.
+        """
+        self._calls.append(("get_blob_status_by_transaction_id", transaction_id))
+        logger.debug(
+            "HeartBeat get_blob_status_by_transaction_id (stub) — txn=%s",
+            transaction_id,
+            extra={"trace_id": self.trace_id},
+        )
+        return None
+
+    async def get_blob_status_by_irn(
+        self, irn: str, tenant_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch blob status by IRN.
+
+        Returns None if not found or HB endpoint not yet live.
+
+        NEEDS-HB: stub — replace with HMAC POST when HB ships the endpoint.
+        """
+        self._calls.append(("get_blob_status_by_irn", irn))
+        logger.debug(
+            "HeartBeat get_blob_status_by_irn (stub) — irn=%s",
+            irn[:16] if irn else "(none)",
+            extra={"trace_id": self.trace_id},
+        )
+        return None
+
     # ── Test Helpers ───────────────────────────────────────────────────────
 
     @property
