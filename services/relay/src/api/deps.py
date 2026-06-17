@@ -12,7 +12,9 @@ Auth dispatcher per BACKEND_SERVICE_AUTH_AND_ABUSE_SPEC.md §3.5:
 Produces a CallerContext that handlers consume uniformly.
 """
 
+import base64
 import hmac
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -21,6 +23,7 @@ from uuid6 import uuid7
 
 from ..config import RelayConfig
 from ..core.auth import authenticate as hmac_authenticate
+from ..core.oauth_validator import JWTValidationError, OAuthTokenValidator
 from ..crypto.envelope import decrypt as nacl_decrypt
 from ..errors import (
     AuthenticationFailedError,
@@ -126,6 +129,73 @@ def _relay_service_auth_header(request: Request) -> str:
     if cfg.heartbeat_api_key and cfg.heartbeat_api_secret:
         return f"Bearer {cfg.heartbeat_api_key}:{cfg.heartbeat_api_secret}"
     return ""
+
+
+def _peek_jwt_aud(token: str) -> Optional[str]:
+    """
+    Decode the JWT payload WITHOUT verifying the signature and return the
+    ``aud`` claim as a string (first element if a list), or ``None``.
+
+    Used only to route the token to the correct validator — actual
+    signature + claims verification happens downstream.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload_bytes = base64.urlsafe_b64decode(padded.encode("ascii"))
+        payload = json.loads(payload_bytes.decode("utf-8"))
+        aud = payload.get("aud")
+        if isinstance(aud, list):
+            return aud[0] if aud else None
+        return aud if isinstance(aud, str) else None
+    except Exception:
+        return None
+
+
+async def _verify_oauth_jwt(
+    request: Request,
+    jwt_token: str,
+) -> CallerContext:
+    """
+    OAuth path (Q37 Gap #2) — local JWKS validation for ``aud=helium.relay-ingest``.
+
+    Validates the token locally using :class:`OAuthTokenValidator` +
+    :class:`JWKSCache`, checks the jti blocklist via Redis, then builds a
+    ``CallerContext`` from the ``tenant_id`` claim in the JWT payload.
+
+    Raises :class:`JWTValidationError` (→ HTTP 401) on any failure.
+    Raises :class:`AuthUpstreamUnavailableError` if the OAuth validator
+    has not been configured on ``app.state`` (config guard).
+    """
+    oauth_validator: Optional[OAuthTokenValidator] = getattr(
+        request.app.state, "oauth_validator", None
+    )
+    if oauth_validator is None:
+        # Shouldn't reach here (caller checks jwks_url first), but guard defensively.
+        raise AuthUpstreamUnavailableError(
+            "OAuth validator not configured on Relay (RELAY_JWKS_URL not set)"
+        )
+
+    redis_client = getattr(request.app.state, "redis", None)
+    trace_id = getattr(request.state, "trace_id", "") or ""
+
+    claims = await oauth_validator.validate(jwt_token, redis_client=redis_client)
+
+    tenant_id = claims.get("tenant_id") or "_unknown"
+    sub = claims.get("sub") or ""
+
+    return CallerContext(
+        actor_type="erp",
+        tenant_id=tenant_id,
+        identifier=sub,
+        permissions=["blob.write", "dedup.check", "audit.log", "metrics.report"],
+        source_id=request.headers.get("x-source-id"),
+        trace_id=trace_id,
+        downstream_auth_header=_relay_service_auth_header(request),
+        raw_api_key="",
+    )
 
 
 async def _verify_service_creds(
@@ -258,6 +328,17 @@ async def authenticate_request(request: Request) -> CallerContext:
             api_key, api_secret = token.split(":", 1)
             return await _verify_service_creds(request, api_key, api_secret)
         # JWT otherwise (compact JWS has two dots).
+        # Q37 Gap #2 — peek the aud claim (no verify) to route to the
+        # correct validator:
+        #   aud=helium.relay-ingest → OAuthTokenValidator (local JWKS)
+        #   anything else           → introspect against HeartBeat (existing path)
+        cfg: RelayConfig = request.app.state.config
+        if (
+            cfg.jwks_url
+            and _peek_jwt_aud(token) == OAuthTokenValidator.REQUIRED_AUD
+        ):
+            return await _verify_oauth_jwt(request, token)
+
         # CSSV1 S1 chip 2/2 — ``X-Bypass-Auth-Cache: true`` (case-insensitive)
         # forces the introspect call to skip the per-jti cache. Any other
         # value (absent, "false", anything else) means cache normally.
