@@ -380,3 +380,18 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   - Where does `firs_service_id` live in tenant config today? (`tenants.json`? `tenant_config`? HB config endpoint?) Need the actual key name so `irn.py` reads it correctly.
   - Pass `external_transaction_id` to HB via `write_blob()` payload — confirm HB will store it once O1 DDL lands (otherwise Relay passes it and HB ignores it until then).
   - Gap #2 (local JWKS): I will wire the validator stub but route to the existing introspect fallback while O3 is unbuilt. OAuth traffic physically can't reach Relay until HB O3 + Relay #2 are both live — no HMAC interim needed because no external traffic flows until OAuth is live.
+
+- 2026-06-17, **Q37 BUILD DISPATCH — all four Relay gaps in flight.** Context compacted and resumed. Bob rulings confirmed:  /api/status partial-now (HB-side live, Core null); AMQP build in parallel. Pre-work landed: shared contract models (`BatchIngestResponse`, `StatusResponse` + supporting types) committed at `daf1870` on `feat/relay-external-ingestion-q37`. Four §5.2 fresh-head sub-agents dispatched in parallel:
+
+  | Agent | Gap(s) | Target files |
+  |-------|--------|--------------|
+  | Gap #3/#4/#7/#8 | Batch JSON-array ingest | `services/batch_external.py` + `routes/ingest.py` update |
+  | Gap #5 | POST /api/status | `routes/status.py` + `services/status_service.py` |
+  | Gap #2 | Local JWKS validation | `core/jwks_cache.py` + `core/oauth_validator.py` + `deps.py` aud-routing |
+  | Gap #6 | AMQP consumer | `services/amqp_consumer.py` + `/health` amqp status |
+
+  All agents commit to `feat/relay-external-ingestion-q37` with no-push constraint; seat does final integration-run + ARCH-vet PR(s) when all four land. Branch is clean at `daf1870` heading into agent fan-out.
+
+  **Outstanding open Qs for ARCH (unchanged):** VAT formula confirm, `batch_id` field confirm, `firs_service_id` key-name confirm, `external_transaction_id` HB DDL path. These are non-blockers for the Relay-side build but needed before the PR can be merged + deployed.
+
+  Watcher re-armed: 30-min active.
