@@ -356,3 +356,27 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   **NEEDS FROM ARCH (unchanged + BLOCKER B added):** Same as 06-15 consolidated list, plus: route BLOCKER B to HB (add `events.batch.subscribe` slug to #129). ARCH please post-vet #25/#26/#27.
 
   Watcher re-armed: 30-min active.
+
+- 2026-06-17, **Q37 EXTERNAL INGESTION — ARCH directive received + digested.** Read all three required docs: `EXTERNAL_INGESTION_ALIGNMENT_2026_06_15.md` (ARCH canonical ruling), `PRONALYTICS_MIDDLEWARE_API.md` (external contract), `PRONALYTICS_MIDDLEWARE_BUILD_GAPS.md` (gap inventory). Full understanding below.
+
+  **My gap assignments (RELAY):**
+
+  | Gap | What | Gating |
+  |-----|------|--------|
+  | #2 | Local JWKS validation of `aud=helium.relay-ingest` tokens on ingest + status | HB O3 (JWKS endpoint + multi-aud JWT manager) |
+  | #3/#4/#7/#8 | Rework `POST /api/ingest`: multipart JSON array → per-record field-map + VAT (7.5% auto when absent) → fan-out to per-invoice IRN+QR → inject tenant `firs_service_id` → return `processed[]/duplicates[]/failed[]` + `summary` | Independent (can build now) |
+  | #5 | NEW `POST /api/status`: orchestrate HB blob-status + Core invoice-status → merge to §3 shape (transaction_id/irn/batch_id selectors, `result` rollup, `firs_status`, flat `results[]`) | Core needs `external_transaction_id` column + by-IRN/by-txn/by-batch lookup; Relay-side can be built + deployed with HB-only data until Core's half lands |
+  | #6 | AMQP consumer: per-tenant exchange/queue/reply-queue; same JSON-array payload | Independent (complex; see Q below) |
+
+  **Doc rewrite (Relay scope):** Frontdoor PR #19 §3/§8/§1.1/§10/§12 — off HMAC → OAuth. Doc-only, no code. Will open as additive PR on the `feat/relay-external-ingestion-q37` branch.
+
+  **Branch guardrail respected:** All Q37 work goes on a FRESH branch `feat/relay-external-ingestion-q37` off current `origin/main` (`1863d28`). **Zero overlap with Sika-critical PRs** (those are all merged to main already; the only open items are #22 R12 frozen + #28 Q28 proposal — neither is Sika-critical). Sika wins any contention.
+
+  **Sensitive (contracts):** every PR on this branch goes to ARCH for diff-vet before merge. No self-merge here (these are new external contracts, not Monday-delegation work).
+
+  **Two Bob-level questions surfaced via AskUserQuestion (below) before I build.** Remaining technical questions for ARCH:
+  - VAT auto-calc formula: `round(fee_amount × 0.075, 2)` when `vat_amount` absent — confirm.
+  - `batch_id` is a NEW multipart field on `/api/ingest` (does not replace any existing field) — confirm.
+  - Where does `firs_service_id` live in tenant config today? (`tenants.json`? `tenant_config`? HB config endpoint?) Need the actual key name so `irn.py` reads it correctly.
+  - Pass `external_transaction_id` to HB via `write_blob()` payload — confirm HB will store it once O1 DDL lands (otherwise Relay passes it and HB ignores it until then).
+  - Gap #2 (local JWKS): I will wire the validator stub but route to the existing introspect fallback while O3 is unbuilt. OAuth traffic physically can't reach Relay until HB O3 + Relay #2 are both live — no HMAC interim needed because no external traffic flows until OAuth is live.
