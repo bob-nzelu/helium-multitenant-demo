@@ -58,8 +58,11 @@ class StubHeartBeatClient(HeartBeatClient):
         }
 
     async def register_blob(self, blob_uuid, filename, file_size_bytes,
-                            file_hash, api_key, metadata=None, jwt_token=None):
-        self._calls.append(("register_blob", blob_uuid))
+                            file_hash, api_key, metadata=None, jwt_token=None,
+                            transaction_ids=None):
+        # L30 §5: transaction_ids recorded so tests can assert the seeding
+        # passthrough (HB worker seeds blob.file_transactions from this).
+        self._calls.append(("register_blob", blob_uuid, transaction_ids))
         return {"blob_uuid": blob_uuid, "status": "registered",
                 "tracking_id": f"track_{uuid7()}"}
 

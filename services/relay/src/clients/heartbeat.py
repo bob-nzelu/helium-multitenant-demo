@@ -565,6 +565,7 @@ class HeartBeatClient(BaseClient):
         api_key: str,
         metadata: Optional[Dict[str, Any]] = None,
         jwt_token: Optional[str] = None,
+        transaction_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Register blob metadata in HeartBeat (non-critical, fire-and-forget).
@@ -580,6 +581,13 @@ class HeartBeatClient(BaseClient):
             api_key: API key used for upload.
             metadata: SDK identity/trace fields.
             jwt_token: Bearer JWT for user identity verification.
+            transaction_ids: External-supplied transaction_ids carried by this
+                file (L30 / DATA_MODEL_CANONICAL §5). Surfaced as a first-class
+                payload field so HB's registration worker seeds one
+                ``blob.file_transactions`` row per id (``status='pending'``).
+                Internal uploads pass none → HB seeds none (Core creates rows at
+                extraction). Canonical shape is a list (one file → N transactions);
+                the external batch path passes exactly one per file today.
 
         Returns:
             {blob_uuid, status, tracking_id}
@@ -600,6 +608,10 @@ class HeartBeatClient(BaseClient):
                 }
                 if metadata:
                     payload["metadata"] = metadata
+                # L30 §5: external transaction_ids → HB seeds file_transactions
+                # rows (pending). NEEDS-HB: registration worker consumes this.
+                if transaction_ids:
+                    payload["transaction_ids"] = transaction_ids
 
                 self._calls.append(("register_blob", blob_uuid))
 
@@ -906,67 +918,55 @@ class HeartBeatClient(BaseClient):
 
         return await self.call_with_retries(_get_config)
 
-    # ── Blob Status (Q37 Gap #5) ───────────────────────────────────────────
+    # ── Transaction Status (L30 / DATA_MODEL_CANONICAL §6) ──────────────────
     #
-    # NEEDS-HB: HeartBeat does not yet expose a blob-status-by-selector
-    # endpoint. These stubs return empty/None so the StatusService can be
-    # wired end-to-end today. When HB ships the endpoint, replace the stub
-    # body with a real HMAC-signed POST (same pattern as fetch_config).
+    # HB answers the PRE-INVOICE phase from blob.file_transactions, keyed by
+    # transaction_id or batch_id ONLY. HB is BLIND to invoice semantics (§8):
+    # it has no irn / invoice_number column, so those selectors are Core-only
+    # (StatusService never calls HB for them).
     #
-    # Provisional endpoint shape (to be confirmed with HB seat):
-    #   POST /api/v1/heartbeat/blob/status
-    #   body: {selector: "batch_id" | "transaction_id" | "irn", value: str,
-    #          tenant_id: str}
-    #   response: {records: [{transaction_id, irn, batch_id, status,
-    #              received_at, processed_at, is_duplicate}, ...]}
+    # NEEDS-HB: the file_transactions table + a status-read endpoint are HB's
+    # chip in the same 2026-06-17 fan-out. These stubs return empty/None so
+    # StatusService is wired end-to-end today; replace the body with a real
+    # HMAC-signed POST when HB ships it.
+    #
+    # Provisional endpoint shape (to confirm with HB seat):
+    #   POST /api/v1/heartbeat/blob/transactions/status
+    #   body: {selector: "batch_id" | "transaction_id", value: str, tenant_id}
+    #   response: {records: [{transaction_id, file_display_id, batch_id,
+    #              status ('pending'|'acknowledged'|'not_an_invoice'),
+    #              received_at, updated_at, is_duplicate}, ...]}
 
-    async def get_blob_status_by_batch(
+    async def get_transactions_by_batch(
         self, batch_id: str, tenant_id: str
     ) -> List[Dict[str, Any]]:
-        """Fetch per-file blob status for a batch.
+        """Fetch file_transactions rows for a batch (pre-invoice status).
 
-        Returns [] if the batch is not found or HB endpoint not yet live.
+        Returns [] if the batch is unknown or the HB endpoint is not yet live.
 
-        NEEDS-HB: stub — replace with HMAC POST when HB ships the endpoint.
+        NEEDS-HB: stub — replace with HMAC POST when HB ships file_transactions.
         """
-        self._calls.append(("get_blob_status_by_batch", batch_id))
+        self._calls.append(("get_transactions_by_batch", batch_id))
         logger.debug(
-            "HeartBeat get_blob_status_by_batch (stub) — batch_id=%s",
+            "HeartBeat get_transactions_by_batch (stub) — batch_id=%s",
             batch_id,
             extra={"trace_id": self.trace_id},
         )
         return []
 
-    async def get_blob_status_by_transaction_id(
+    async def get_transaction_by_id(
         self, transaction_id: str, tenant_id: str
     ) -> Optional[Dict[str, Any]]:
-        """Fetch blob status by external_transaction_id.
+        """Fetch a single file_transactions row by transaction_id.
 
-        Returns None if not found or HB endpoint not yet live.
+        Returns None if unknown or the HB endpoint is not yet live.
 
-        NEEDS-HB: stub — replace with HMAC POST when HB ships the endpoint.
+        NEEDS-HB: stub — replace with HMAC POST when HB ships file_transactions.
         """
-        self._calls.append(("get_blob_status_by_transaction_id", transaction_id))
+        self._calls.append(("get_transaction_by_id", transaction_id))
         logger.debug(
-            "HeartBeat get_blob_status_by_transaction_id (stub) — txn=%s",
+            "HeartBeat get_transaction_by_id (stub) — txn=%s",
             transaction_id,
-            extra={"trace_id": self.trace_id},
-        )
-        return None
-
-    async def get_blob_status_by_irn(
-        self, irn: str, tenant_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Fetch blob status by IRN.
-
-        Returns None if not found or HB endpoint not yet live.
-
-        NEEDS-HB: stub — replace with HMAC POST when HB ships the endpoint.
-        """
-        self._calls.append(("get_blob_status_by_irn", irn))
-        logger.debug(
-            "HeartBeat get_blob_status_by_irn (stub) — irn=%s",
-            irn[:16] if irn else "(none)",
             extra={"trace_id": self.trace_id},
         )
         return None

@@ -14,7 +14,7 @@ failures, which trigger graceful degradation (status="queued").
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from uuid6 import uuid7
 
@@ -235,40 +235,69 @@ class CoreClient(BaseClient):
 
     async def get_invoice_status(
         self,
-        transaction_id: Optional[str],
-        irn: Optional[str],
-        tenant_id: str,
+        transaction_id: Optional[str] = None,
+        irn: Optional[str] = None,
+        invoice_number: Optional[str] = None,
+        tenant_id: str = "",
     ) -> Optional[Dict[str, Any]]:
         """
-        Get invoice status from Core by transaction_id or IRN.
+        Get one invoice's status from Core (L30 §6 invoice-level phase).
 
-        Returns None until Core builds the external_transaction_id lookup
-        column (Bob's ruling 2026-06-17). StatusService treats None as
-        graceful — HB-side data is still returned with firs_status=null
-        and invoice_number=null.
+        Core is the ONLY resolver of ``irn`` / ``invoice_number`` (HB is blind
+        to invoice semantics, §8); it also resolves ``external_transaction_id``.
+        Returns None until Core ships the lookup (Gap #5 Core half, §5.3 — the
+        ``external_transaction_id`` column + by-irn/by-number/by-txn lookup).
+        StatusService treats None as graceful: the HB-side transaction record
+        is still returned with firs_status / invoice_number / irn left null.
 
-        NEEDS-CORE: Gap #5 (Core half). When Core ships the lookup,
-        replace this stub with a real HMAC/JWT-forwarded POST.
+        NEEDS-CORE: when Core ships the lookup, replace this stub with a real
+        HMAC/JWT-forwarded POST. Expected record shape:
+            {external_transaction_id, invoice_number, irn, workflow_status,
+             transmission_status (→ firs_status), processed_at}
 
         Args:
-            transaction_id: ERP transaction reference (may be None).
-            irn: Invoice Reference Number (may be None).
-            tenant_id: Calling tenant.
+            transaction_id: ERP reference → invoices.external_transaction_id.
+            irn: Invoice Reference Number.
+            invoice_number: Tenant invoice number.
+            tenant_id: Calling tenant (L16 scoped).
 
         Returns:
             None — stub until Core builds the endpoint.
         """
         async def _get_status():
             logger.debug(
-                "Core get_invoice_status (stub) — transaction_id=%s irn=%s",
+                "Core get_invoice_status (stub) — txn=%s irn=%s inv_no=%s",
                 transaction_id or "(none)",
                 (irn or "(none)")[:16],
+                invoice_number or "(none)",
                 extra={"trace_id": self.trace_id},
             )
             # Stub: Core gap #5 (Core half) not yet built.
             return None
 
         return await self.call_with_retries(_get_status)
+
+    async def get_invoices_by_batch(
+        self, batch_id: str, tenant_id: str = ""
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all invoices for a batch from Core (L30 §6 batch query).
+
+        Returns [] until Core ships the by-batch lookup (Gap #5 Core half).
+        StatusService merges these onto the HB file_transactions rows by
+        transaction_id (= external_transaction_id on the invoice).
+
+        NEEDS-CORE: stub — replace with a real HMAC/JWT POST when Core ships it.
+        """
+        async def _get_batch():
+            logger.debug(
+                "Core get_invoices_by_batch (stub) — batch_id=%s",
+                batch_id,
+                extra={"trace_id": self.trace_id},
+            )
+            return []
+
+        return await self.call_with_retries(_get_batch)
 
     async def publish_lifecycle_event(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         """
