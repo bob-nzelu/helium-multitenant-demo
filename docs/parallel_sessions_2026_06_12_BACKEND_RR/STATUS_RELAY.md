@@ -419,3 +419,21 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   **NEEDS FROM ARCH:** vet #29 + #19; confirm the 4 open Qs (VAT formula, `batch_id` additive field, `firs_service_id`=`TenantConfig.service_id`, `external_transaction_id` HB path); route BLOCKER B to HB (`events.batch.subscribe` slug); post-vet #25/#26/#27.
 
   Watcher re-armed: 30-min active.
+
+- 2026-06-17 (evening), **L30 CANONICAL DATA MODEL — RELAY chip built (registering).** Read `DATA_MODEL_CANONICAL.md` (L30) + `FANOUT_DATA_MODEL_2026_06_17.md §RELAY` off `origin/master`. My three deliverables, all on `feat/relay-external-ingestion-q37` (stacked on the Q37 build, since every file is already in unmerged PR #29):
+
+  1. **`/api/status` → 4 selectors + HB(file_transactions)/Core merge (canon §6).** Added `invoice_number` as the 4th selector. Refactored `StatusService` to the canonical routing: HB answers the PRE-INVOICE phase (`transaction_id`/`batch_id` → `blob.file_transactions`, status `pending`/`acknowledged`/`not_an_invoice`); Core answers the INVOICE phase and is the SOLE resolver of `invoice_number`/`irn` (HB is invoice-blind per §8, so those go Core-first with an HB backfill by the returned txn). Merge by `transaction_id ≡ external_transaction_id`. Replaced the wrong `get_blob_status_by_irn` HB stub (HB can't resolve IRN) with `get_transactions_by_batch` / `get_transaction_by_id`; Core gained `get_invoices_by_batch` + a 4-arg `get_invoice_status`.
+  2. **Seed external transaction_ids at ingest (canon §5).** `register_blob` now takes `transaction_ids` as a first-class payload field; `ingestion._register_blob` surfaces `metadata["transaction_id"]` → `transaction_ids=[txn]` so HB's registration worker seeds one `file_transactions` row (`pending`) per id. Internal uploads carry none → HB seeds none.
+  3. **Doc fix (canon §9).** `SIMULATOR_CONTRACT.md:342` — clarified `transaction_id == invoice_number` is a Simulator-only simplification, false for real ERPs (§2/Q40).
+
+  **`result`-vocab reconciliation (the L29 "3-way collision" ARCH flagged):** mapped HB Tier-3 status + Core Tier-4 state onto the ERP surface → `pending | processed | not_an_invoice | duplicate | failed`. **`not_an_invoice` is ADDITIVE to L29's published 4-value set** — surfaced because it's a real terminal an ERP must see. **Flagged for ARCH/Bob ratification of the L29 vocab extension.**
+
+  **Both backends are NEEDS-* stubs** (HB `file_transactions`+read-endpoint and Core lookup are the OTHER seats' chips in this same fan-out), so a live `/api/status` returns `results=[]` until they ship — the merge logic is the contract they light up against. Mirrors the dormant-until-dependency pattern from Gap #2/#5.
+
+  **⚠️ Canon path correction for ARCH:** DATA_MODEL_CANONICAL §9 + the fan-out cite `services/relay/Documentation/SIMULATOR_CONTRACT.md:342`, but the file actually lives at **`services/simulator/SIMULATOR_CONTRACT.md`** (verified by `git ls-files`). Fixed the real file; please correct the canon's §9 reference.
+
+  **Verification:** 49 status tests + 2 ingest-seeding tests rewritten/added to the L30 design; targeted run (status_service + status_route + ingestion + batch_external) = **123 passed**. Full-suite confirmation pending (expect 7 pre-existing fails, zero regressions — same baseline).
+
+  **Branch decision (flagging for ARCH):** built ON the Q37 branch / **PR #29** rather than a separate stack, because the L30 work *rewrites* the Gap #5 status service before it ever merged — folding yields the canonical final diff with no build-then-rewrite churn. If you'd prefer it as a separate stacked chip, say so and I'll split. Sensitive contract → **ARCH vet, no self-merge.**
+
+  Watcher re-armed: 30-min active.
