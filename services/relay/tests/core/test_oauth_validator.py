@@ -332,3 +332,42 @@ class TestMissingKidInHeader:
 
         with pytest.raises(JWTValidationError, match="kid"):
             await validator.validate(token, redis_client=None)
+
+
+class TestAlgorithmConfusionGuard:
+    """spec R1 — the 'alg' header MUST be pinned to EdDSA.
+
+    Each token below is signed with the REAL Ed25519 key (so the signature
+    itself is valid) but declares a non-EdDSA / missing alg. The guard must
+    reject every one BEFORE trusting the token — the classic JWT
+    algorithm-confusion defense.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_alg", ["none", "None", "HS256", "RS256", "ES256", ""])
+    async def test_non_eddsa_alg_rejected(self, validator, private_key, bad_alg):
+        claims = _valid_claims()
+        token = _make_jwt(private_key, claims, alg=bad_alg)
+        with pytest.raises(JWTValidationError, match="alg"):
+            await validator.validate(token, redis_client=None)
+
+    @pytest.mark.asyncio
+    async def test_missing_alg_header_rejected(self, validator, private_key):
+        """Header with no 'alg' key at all → rejected (no empty-alg carve-out)."""
+        claims = _valid_claims()
+        header = {"kid": "test-key-1", "typ": "JWT"}  # no alg
+        header_b64 = _b64url(json.dumps(header).encode("utf-8"))
+        payload_b64 = _b64url(json.dumps(claims).encode("utf-8"))
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+        sig_b64 = _b64url(private_key.sign(signing_input))
+        token = f"{header_b64}.{payload_b64}.{sig_b64}"
+
+        with pytest.raises(JWTValidationError, match="alg"):
+            await validator.validate(token, redis_client=None)
+
+    @pytest.mark.asyncio
+    async def test_eddsa_alg_still_accepted(self, validator, private_key):
+        """Sanity: the canonical EdDSA token still passes the tightened guard."""
+        token = _make_jwt(private_key, _valid_claims())
+        result = await validator.validate(token, redis_client=None)
+        assert result["tenant_id"] == "tenant-abbey"

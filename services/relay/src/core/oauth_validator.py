@@ -149,12 +149,16 @@ class OAuthTokenValidator:
         kid = header.get("kid")
         if not kid:
             raise JWTValidationError("JWT header missing 'kid' claim")
-        alg = header.get("alg", "")
-        if alg not in ("EdDSA", ""):
-            # We only support EdDSA (Ed25519).  Empty alg is tolerated
-            # for test tokens during the pre-O3 period.
+        # Pin the algorithm to EdDSA and reject everything else — missing /
+        # empty alg, "none", and any HS*/RS*/ES* (spec R1; the classic JWT
+        # algorithm-confusion defense). Signature verification below is
+        # hardcoded to Ed25519 regardless, but we refuse a token that does not
+        # explicitly declare EdDSA rather than leaning on that as the only
+        # backstop. No carve-out for empty alg — test tokens declare EdDSA too.
+        alg = header.get("alg")
+        if alg != "EdDSA":
             raise JWTValidationError(
-                f"Unsupported JWT algorithm: {alg!r}; expected EdDSA"
+                f"Unsupported JWT 'alg'={alg!r}; only EdDSA is accepted"
             )
 
         # ── Step 2: fetch public key by kid ──────────────────────────
