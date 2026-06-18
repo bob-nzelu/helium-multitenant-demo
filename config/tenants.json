@@ -2,8 +2,8 @@
   "abmfb": {
     "api_key":       "ABMFB-2026-K7X9MNPQ",
     "api_secret":    "hx84Tz2wVqLmN9jKpRdY6cBsAeWfUg3n",
-    "service_id":    "ABMFB",
-    "firs_service_id": "94ND90NR",
+    "service_id":    "B673FBAF",
+    "firs_service_id": "B673FBAF",
     "name":          "AB Microfinance Bank",
     "format_type":   "flat",
     "fields":        {}

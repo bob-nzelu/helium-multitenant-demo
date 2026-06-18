@@ -219,7 +219,7 @@ One result envelope for the whole batch, with a per-invoice breakdown:
   "processed": [
     {
       "transaction_id": "TXN20260617LAG00002",
-      "irn": "TXN20260617LAG00002-94ND90NR-20260617",
+      "irn": "TXN20260617LAG00002-B673FBAF-20260617",
       "qr_code": "iVBORw0KGgoAAAANSUhEUgAA...",
       "data_uuid": "550e8400-e29b-41d4-a716-446655440000",
       "fee_amount": 250000.00,
@@ -230,7 +230,7 @@ One result envelope for the whole batch, with a per-invoice breakdown:
     {
       "transaction_id": "TXN20260617LAG00001",
       "message": "Already received in a previous batch",
-      "duplicate_of": { "irn": "TXN20260617LAG00001-94ND90NR-20260617", "data_uuid": "…", "batch_id": "…" }
+      "duplicate_of": { "irn": "TXN20260617LAG00001-B673FBAF-20260617", "data_uuid": "…", "batch_id": "…" }
     }
   ],
   "failed": []
@@ -307,7 +307,7 @@ curl -X POST https://api.pronalytics.ng/api/status \
   "results": [
     {
       "transaction_id": "TXN20260617LAG00002",
-      "irn": "TXN20260617LAG00002-94ND90NR-20260617",
+      "irn": "TXN20260617LAG00002-B673FBAF-20260617",
       "batch_id": "BATCH202606170930",
       "result": "processed",
       "firs_status": "ACCEPTED",
