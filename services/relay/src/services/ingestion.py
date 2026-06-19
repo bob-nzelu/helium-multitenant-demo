@@ -27,7 +27,7 @@ Identity model:
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from helium_hash import sha256_file
@@ -36,6 +36,7 @@ from uuid6 import uuid7
 from ..config import RelayConfig
 from ..core.dedup import DedupChecker
 from ..core.validation import validate_files
+from ..db.ledger import IngestLedger
 from ..errors import (
     DuplicateFileError,
     JWTRejectedError,
@@ -78,6 +79,20 @@ class IngestResult:
         """Primary blob path (first file, for backward compat)."""
         return self.blob_paths[0] if self.blob_paths else ""
 
+    def to_payload(self) -> Dict[str, Any]:
+        """Serializable envelope for the ingest ledger's idempotent-replay store."""
+        return asdict(self)
+
+    @classmethod
+    def from_payload(cls, payload: Dict[str, Any]) -> "IngestResult":
+        """Reconstruct an IngestResult from a ledger ``result_json`` payload.
+
+        Tolerant of unknown keys (forward-compat if the dataclass shrinks);
+        only the declared fields are pulled through.
+        """
+        fields = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in payload.items() if k in fields})
+
 
 class IngestionService:
     """
@@ -94,11 +109,17 @@ class IngestionService:
         heartbeat_client: Any,
         core_client: Any,
         redis_client: Any = None,
+        ledger: Optional[IngestLedger] = None,
     ):
         self._config = config
         self._heartbeat = heartbeat_client
         self._core = core_client
         self._redis = redis_client
+        # Durable write-first ingest ledger (relay.db). Optional/guarded:
+        # when None (RELAY_DB_PATH unset) the ledger is disabled and the
+        # pipeline behaves exactly as before — no crash-survival, no durable
+        # idempotency, zero behaviour change. Q28 / Frontdoor §3.2.
+        self._ledger = ledger
 
     async def ingest(
         self,
@@ -107,6 +128,7 @@ class IngestionService:
         trace_id: str = "",
         metadata: Optional[Dict] = None,
         jwt_token: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> IngestResult:
         """
         Run the full 7-step ingestion pipeline.
@@ -114,12 +136,22 @@ class IngestionService:
         Per-file model: each file is hashed, dedup-checked, and uploaded
         individually. All requests (single or multi-file) get a data_uuid.
 
+        Write-first durable ledger (Q28 / Frontdoor §3.2): when the ingest
+        ledger is enabled (RELAY_DB_PATH set), a ``relay.db`` row is written
+        BEFORE the Step 4 blob commit (crash-survival), and the idempotency
+        key ``(tenant_id, file_sha256)`` short-circuits a re-ingest of the
+        same bytes to the prior result (idempotent replay; pipeline not re-run).
+        When the ledger is disabled this is a no-op.
+
         Args:
             files: List of (filename, file_data) tuples.
             api_key: Authenticated API key (from auth middleware).
             trace_id: Request trace ID for logging.
             metadata: SDK identity/trace fields (forwarded to HeartBeat).
             jwt_token: Bearer JWT (forwarded to HeartBeat/Core for identity).
+            tenant_id: Tenant slug for the ledger idempotency key. Defaults to
+                ``api_key`` when not supplied (the api_key is the tenant
+                identifier on the current single-binary deployment shape).
 
         Returns:
             IngestResult with per-file hashes, blob_uuids, blob_paths.
@@ -131,6 +163,10 @@ class IngestionService:
             JWTRejectedError: HeartBeat returns 401 on blob write.
             InternalError: Step 4+ critical failure.
         """
+        # Tenant for the ledger idempotency key. On today's single-binary
+        # shape the api_key resolves the tenant (deps.py::_tenant_id_for_api_key),
+        # so it is the safe default when an explicit tenant slug is not passed.
+        ledger_tenant = tenant_id or api_key
         # ── Step 1: Validate files ────────────────────────────────────────
         validate_files(files, self._config)
         logger.info(
@@ -170,6 +206,34 @@ class IngestionService:
         filenames = [name for name, _ in files]
         total_size = sum(len(data) for _, data in files)
 
+        # ── Write-first: durable ledger record (Q28 / Frontdoor §3.2) ─────
+        # Idempotency key = (tenant_id, file_sha256). The request's sha is the
+        # primary (first) file's canonical hash — for the single-file external
+        # / Path-A case this IS the file. Written BEFORE the Step 4 commit so a
+        # crash mid-pipeline leaves a durable trace; a re-ingest of the same
+        # bytes short-circuits to the prior result (idempotent replay).
+        ledger_sha = per_file_hashes[0] if per_file_hashes else ""
+        if self._ledger is not None and ledger_sha:
+            outcome, prior = self._ledger.record_received(
+                ledger_tenant, ledger_sha,
+                trace_id=trace_id, data_uuid=data_uuid,
+            )
+            if outcome == "duplicate":
+                replay = prior.result_payload if prior is not None else None
+                if replay is not None:
+                    logger.info(
+                        f"[{trace_id}] Ledger idempotent replay — "
+                        f"tenant={ledger_tenant}, sha={ledger_sha[:12]}... "
+                        f"(pipeline NOT re-run)"
+                    )
+                    result = IngestResult.from_payload(replay)
+                    result.status = "duplicate"
+                    return result
+                # Row exists but no replay payload (e.g. a prior crash left it
+                # 'pending', or a prior 'error'). Surface as a duplicate rather
+                # than silently re-processing — the durable key already saw it.
+                raise DuplicateFileError(file_hash=ledger_sha)
+
         # ── Step 4: COMMIT POINT — Write blobs (one per file) ─────────────
         blob_uuids: List[str] = []
         blob_paths: List[str] = []
@@ -201,10 +265,16 @@ class IngestionService:
                     metadata=per_file_metadata,
                     jwt_token=jwt_token,
                 )
-            except JWTRejectedError:
-                # Let JWT rejection propagate cleanly as 401
+            except JWTRejectedError as e:
+                # Let JWT rejection propagate cleanly as 401 — but record the
+                # terminal failure in the durable ledger first.
+                self._ledger_mark_error(ledger_tenant, ledger_sha, str(e))
                 raise
             except Exception as e:
+                self._ledger_mark_error(
+                    ledger_tenant, ledger_sha,
+                    f"Blob write failed for {filename}: {e}",
+                )
                 raise InternalError(
                     message=f"Blob write failed for {filename}: {e}",
                     original_error=e,
@@ -263,7 +333,7 @@ class IngestionService:
         )
         logger.info(f"[{trace_id}] Step 7/7: Audit logged")
 
-        return IngestResult(
+        result = IngestResult(
             data_uuid=data_uuid,
             queue_id=queue_id,
             filenames=filenames,
@@ -274,7 +344,30 @@ class IngestionService:
             blob_paths=blob_paths,
         )
 
+        # Write-first ledger: pipeline succeeded → mark processed + store the
+        # result envelope so a future re-ingest of the same bytes replays it.
+        if self._ledger is not None and ledger_sha:
+            self._ledger.mark_processed(
+                ledger_tenant, ledger_sha,
+                data_uuid=data_uuid,
+                result_payload=result.to_payload(),
+            )
+
+        return result
+
     # ── Internal Helpers ──────────────────────────────────────────────────
+
+    def _ledger_mark_error(
+        self, tenant_id: str, file_sha256: str, message: str
+    ) -> None:
+        """Best-effort ledger error mark; never raises (ledger must not mask
+        the real pipeline error). No-op when the ledger is disabled."""
+        if self._ledger is None or not file_sha256:
+            return
+        try:
+            self._ledger.mark_error(tenant_id, file_sha256, message)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"ingest_ledger mark_error failed: {e}")
 
     async def _check_daily_limit(
         self, api_key: str, file_count: int, trace_id: str

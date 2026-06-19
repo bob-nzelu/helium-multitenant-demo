@@ -92,6 +92,15 @@ class RelayConfig:
     # RELAY_JWKS_URL once HB O3 ships.
     jwks_url: str = ""
 
+    # ── relay.db ingest ledger (Q28 / Frontdoor §2, §6) ─────────────────
+    # Per-tenant SQLite file — the LOCKED all-PG exception. Path to the
+    # durable write-first ingest ledger (crash-survival + idempotency on
+    # tenant_id+file_sha256). Empty = ledger DISABLED (no behaviour change;
+    # the synchronous ingest path runs exactly as before). Do NOT point this
+    # at PostgreSQL — relay.db is intentionally SQLite (FRONTDOOR_ARCHITECTURE
+    # §2.3 lock). Rollback = delete the file or unset this var.
+    relay_db_path: str = ""                 # RELAY_DB_PATH
+
     # ── Malware scanning ──────────────────────────────────────────────────
     malware_scan_enabled: bool = False
     malware_clamd_socket: str = ""
@@ -232,6 +241,10 @@ class RelayConfig:
         # ── OAuth / JWKS
         if v := env("JWKS_URL"):
             kwargs["jwks_url"] = v
+
+        # ── relay.db ingest ledger
+        if v := env("DB_PATH"):
+            kwargs["relay_db_path"] = v
 
         # ── Malware scanning
         if v := env("MALWARE_SCAN_ENABLED"):
