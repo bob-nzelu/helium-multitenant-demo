@@ -472,3 +472,13 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
 **This tick's chip:** clear #10 (disposition call, then merge-or-close). Next: drive L5 (#22), tee up #19/#28 for ARCH. **Sensitive items (#29 merge, #28 schema, #22 scheme) explicitly NOT self-merged** — they ride ARCH's 15-min vet.
 
   Watcher re-armed: **15-min active** (WILD SPRINT cadence).
+
+- 2026-06-19 **SPRINT tick 1 — #10 CLEARED (backlog 5→4).** Closed PR #10 (Phase-1b abuse middleware) as **superseded**, with a full verified rationale on the PR. Findings: its Keel introspect-cache commit is **already on `main`** (CSSV1 S1 chip 2/2, `INTROSPECT_CACHE_TTL_S=30`); rate-limit lives via Redis (`ingestion._check_daily_limit`), size caps via `validate_files`+config, timeout via `RELAY_REQUEST_TIMEOUT_S`, and external-path replay is now the OAuth `jti`-blocklist (Gap #2) + s2s `X-Nonce` — the Phase-1b nonce middleware targeted the retired external-HMAC path. The branch conflicts across all 12 files (CSSV1/Q37 rewrote them); a rebase = rewrite, not a small chip. Reopenable if misjudged. (Dead branch `feat/relay-phase-1b-abuse-middleware` left in place — not deleting remote branches unilaterally; ARCH can prune.)
+
+  **Open RELAY PRs now: #29, #28, #22, #19.** None are safe *unilateral* merges — each needs ARCH/HB/Bob, surfaced below for the 15-min vet cycle:
+  - **#29** — gated on HB JWKS (cond #2) + Bob final-merge (sensitive ext contract). MERGEABLE/null-safe. No action until HB O3.
+  - **#22 / L5 webhook — DECISION NEEDED (drives consolidation; cross-service = ARCH/HB call, not mine).** L5 still ⚠ UNHARMONIZED. Webhook is HB→Relay (HB sender, Relay receiver). Two coded options: **(a) symmetric 2-header HMAC** — already coded in Relay's R12 receiver (`webhook_auth.py`, `X-HeartBeat-Timestamp`+`X-HeartBeat-Signature`, key `RELAY_WEBHOOK_SIGNING_KEY`); **(b) #68 Ed25519 asymmetric** (HB proposal). **ARCH/HB: rule which wins.** Relay adapts either way — keep #22's HMAC verifier, or I swap `webhook_auth.py` to Ed25519-verify. #22 is also now CONFLICTING vs main; I'll rebase it *after* the scheme is ruled (rebasing a frozen branch before the decision = wasted work). No redesign — I build to whichever shape ARCH locks.
+  - **#19 (frontdoor doc)** — MERGEABLE; the doc's own header says "pending Bob review" (it carries the relay.db schema *proposal*). **Bob: ok to land as canonical Frontdoor reference, or hold for your read?** Not self-merging over its stated review gate. Overlaps #28 on relay.db.
+  - **#28 (Q28 relay.db durable-ingestion)** — sensitive schema proposal, HOLDING since launch. **ARCH: vet this sprint?** Holding build until ARCH-vet + Bob-ratify.
+
+  Watcher re-armed: **15-min active**.
