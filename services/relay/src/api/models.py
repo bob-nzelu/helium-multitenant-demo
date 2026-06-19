@@ -16,10 +16,13 @@ from pydantic import BaseModel, Field
 class BatchProcessedEntry(BaseModel):
     """One successfully fiscalized invoice in a batch ingest response.
 
-    L31 (monetary & tax precision): money is ``Decimal``, never ``float`` — it
+    L31 (monetary precision): money is ``Decimal``, never ``float`` — it
     serializes to a JSON string (e.g. ``"7.50"``) so no float imprecision is
-    reintroduced on the wire. ``vat_source`` transparently labels whether VAT
-    was the caller's authoritative value or Relay's 7.5% fallback.
+    reintroduced on the wire.
+
+    VAT (Bob ratification 2026-06-19): production Relay does NO VAT math. A
+    caller-supplied ``vat_amount`` is echoed verbatim; absent → ``null`` (VAT is
+    computed by Core/Transforma downstream, surfaced via the status/invoice).
     """
 
     transaction_id: str = Field(description="ERP's unique reference, echoed")
@@ -27,10 +30,9 @@ class BatchProcessedEntry(BaseModel):
     qr_code: str = Field(description="QR code for this invoice, Base64-encoded")
     data_uuid: str = Field(description="Relay internal storage handle")
     fee_amount: Decimal = Field(description="Echoed invoice amount in NGN (Decimal, JSON string)")
-    vat_amount: Decimal = Field(description="VAT in NGN (Decimal, JSON string)")
-    vat_source: str = Field(
-        default="caller_supplied",
-        description="caller_supplied (authoritative, verbatim) | auto_7.5pct (Relay fallback, ROUND_HALF_UP)",
+    vat_amount: Optional[Decimal] = Field(
+        default=None,
+        description="Caller-supplied VAT echoed verbatim (Decimal, JSON string); null if not supplied — Relay does no VAT math",
     )
 
 

@@ -2,9 +2,13 @@
 Batch External Service (Q37 Gap #3/#4/#7/#8)
 
 Processes a JSON array of ERP invoice records in one POST /api/ingest request.
-Each record is validated, VAT-computed (7.5% if absent), deduplicated by
-transaction_id, then an IRN + QR are generated using the tenant's
-firs_service_id from TenantConfig.service_id.
+Each record is validated, deduplicated by transaction_id, then an IRN + QR are
+generated using the tenant's firs_service_id from TenantConfig.service_id.
+
+VAT: PRODUCTION RELAY DOES NO VAT MATH (Bob ratification 2026-06-19 — VAT
+computation is Core/Transforma territory). A caller-supplied vat_amount is
+forwarded verbatim (Decimal precision preserved); absent → null. The 7.5%
+auto-compute lives ONLY on the demo-gated AB-MFB mock API (helium-abmfb-demo).
 
 Dedup key: SHA-256 of the serialised record bytes (same primitive as the
 file-level DedupChecker). Falls back to transaction_id if blob write has not
@@ -21,7 +25,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from uuid6 import uuid7
@@ -123,7 +127,8 @@ class BatchExternalService:
 
         Per-record steps:
             1. Validate: transaction_id required, fee_amount required.
-            2. VAT: if vat_amount absent → round(fee_amount * 0.075, 2).
+            2. VAT: forward caller-supplied vat_amount verbatim (no compute/check
+               — production Relay does no VAT math).
             3. Apply tenant field mapping via tenant.get_field().
             4. Dedup: in-batch session set of seen transaction_ids.
             5. Write one blob per record via the shared ingestion pipeline.
@@ -159,19 +164,14 @@ class BatchExternalService:
                 )
                 continue
 
-            # Step 2 — VAT (L31 monetary & tax precision).
-            # Caller-supplied vat_amount is AUTHORITATIVE — used verbatim, no
-            # re-rounding (no-handwaving). Only the 7.5% fallback is computed,
-            # and it is computed in Decimal + ROUND_HALF_UP and transparently
-            # labelled so a computed value is never presented as document-truth.
+            # Step 2 — VAT pass-through ONLY (Bob ratification 2026-06-19, L31
+            # scope split): VAT computation/checks are Core/Transforma territory.
+            # PRODUCTION RELAY DOES NO VAT MATH — no auto-compute, no check, no
+            # default. The caller's vat_amount (if present) is forwarded verbatim;
+            # Decimal typing preserves precision in transit. Absent → stays None
+            # (Transforma computes it downstream). The 7.5% auto-compute now
+            # lives ONLY on the demo-gated AB-MFB mock API (helium-abmfb-demo).
             vat_amount = _coerce_decimal(raw_record, "vat_amount", tenant)
-            if vat_amount is None:
-                vat_amount = (fee_amount * Decimal("0.075")).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
-                )
-                vat_source = "auto_7.5pct"
-            else:
-                vat_source = "caller_supplied"
 
             # Step 4 — in-batch dedup by transaction_id
             if txn_id in seen_txn_ids:
@@ -290,7 +290,6 @@ class BatchExternalService:
                     data_uuid=data_uuid,
                     fee_amount=fee_amount,
                     vat_amount=vat_amount,
-                    vat_source=vat_source,
                 )
             )
             logger.info(
@@ -346,19 +345,21 @@ def _build_canonical(
     record: Dict[str, Any],
     txn_id: str,
     fee_amount: Decimal,
-    vat_amount: Decimal,
+    vat_amount: Optional[Decimal],
     tenant: TenantConfig,
 ) -> Dict[str, Any]:
     """Build a canonical dict from the raw record, with resolved field names.
 
     Money is serialized as a STRING (``str(Decimal)``) so the canonical blob is
     JSON-safe and lossless — ``json.dumps`` cannot encode ``Decimal``, and a
-    float round-trip would reintroduce the imprecision L31 forbids.
+    float round-trip would reintroduce the imprecision L31 forbids. ``vat_amount``
+    is forwarded verbatim when the caller supplied it, else ``null`` (Relay does
+    no VAT math — Transforma computes it downstream).
     """
     return {
         "transaction_id": txn_id,
         "fee_amount": str(fee_amount),
-        "vat_amount": str(vat_amount),
+        "vat_amount": str(vat_amount) if vat_amount is not None else None,
         "description": _coerce_str(record, "description", tenant),
         "transaction_date": _coerce_str(record, "transaction_date", tenant),
         "branch": _coerce_str(record, "branch", tenant),
