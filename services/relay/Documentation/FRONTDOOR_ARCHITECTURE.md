@@ -718,3 +718,27 @@ Honest list of what I cannot resolve in this session and what Bob's input would 
 ## §14. Revision — external ingestion OAuth cutover (2026-06-17)
 
 This doc was authored 2026-05-10 with the external path described as 3-header HMAC. Per the **2026-06-15 external-ingestion alignment** (ARCH, Q37), the external ERP contract is now **OAuth 2.0 `client_credentials`**. Sections rewritten in this revision: §3 (Path A wire + ordering + §3.3 auth shape + §3.6 ships table), §8 (security stack: application auth / tenant isolation / replay rows), §10 (phasing — Q37 row added), §12.2 (Q-Nonce resolved + Q-OAuth-Gate added), §12.5 (external auth-model note). The HMAC validator stays in code for internal/legacy callers; it is no longer part of the external integrator contract. Authoritative sources: `EXTERNAL_INGESTION_ALIGNMENT_2026_06_15.md`, `EXTERNAL_SERVICE_OAUTH_SPEC.md`, `PRONALYTICS_MIDDLEWARE_API.md`.
+
+---
+
+## §15. HeartBeat → Relay webhook messaging (the standard internal-service change-push)
+
+This is the **inbound** counterpart to everything above: how Relay learns that something it caches has changed, **without polling** (timers/pollers are banned — push only).
+
+### §15.1 Why Relay consumes a webhook
+
+Relay holds a local cache of per-tenant state so it need not call HeartBeat on every request (latency + resilience if HB is briefly down): tenant config, FIRS/signing keys, the IQC / intelligence-pack **module versions** (L27/L32 — HB propagates pack-version bumps to **both Core and Relay**), and the version-drift axes (policy / license / usage / auth-policy / user-permissions revisions). Cached state goes stale the instant an admin changes it on HB. Relay must refresh **immediately and event-driven** — so HeartBeat **pushes** a small signed notification and Relay invalidates/refetches just that slice.
+
+### §15.2 The standard (Helium-wide, HB-owned)
+
+Per Bob (2026-06-19): there is **one standard internal-service webhook** that **every** Helium service (Relay, Core, Edge, …) implements — HeartBeat is the sender; the service is the receiver. It is **one delivery type with a catalogue of message types**: each message says *what changed* (and, implicitly, *what to fetch next*) — the webhook carries the **signal, not the payload**; the service then fetches the authoritative value from HB. Authentication is **HMAC** (the symmetric 2-header scheme ruled canonical on **L5**: `X-HeartBeat-Timestamp` + `X-HeartBeat-Signature`, 5-min replay window, per-service key; Ed25519 deferred).
+
+> **HARMONIZATION ASK → ARCH/HeartBeat (surfaced 2026-06-19):** the **canonical protocol + the message-type catalogue** for this standard should be **documented by HeartBeat** and harmonized across all services (each service implements, minimally, the message types relevant to it). Relay is asking ARCH to confirm/locate that HB spec; if it isn't documented yet, HB should author it. Relay's L5 receiver already implements the HMAC envelope — what's missing platform-wide is the agreed **message-type set**.
+
+### §15.3 Relay's receiver + the change-events it cares about
+
+- **Receiver:** `services/relay/src/api/webhook_auth.py` (the R12 chip, PR #22) — verifies the HMAC envelope, then dispatches on message type.
+- **Message types Relay must minimally handle** (Relay's expected set, pending the canonical HB catalogue): tenant **config changed** → refetch config; **signing/cipher key rotated** → refetch keys; **IQC / intelligence-pack module version bumped** → refresh the cached module (ties the L27/L32 version signal that HB sends to Relay as well as Core); **version-axis revision** (policy / license / usage / auth-policy / user-permissions) → update the drift-gate's authoritative values.
+- **Discipline:** the webhook is a *signal*; Relay re-fetches from HB's authoritative endpoint — it never trusts state carried in the webhook body beyond "what changed."
+
+This section documents Relay's side + the standard's intent; the **authoritative protocol/message catalogue is HB's to own and ARCH's to harmonize** (see §15.2).
