@@ -482,3 +482,9 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   - **#28 (Q28 relay.db durable-ingestion)** — sensitive schema proposal, HOLDING since launch. **ARCH: vet this sprint?** Holding build until ARCH-vet + Bob-ratify.
 
   Watcher re-armed: **15-min active**.
+
+- 2026-06-19 **SPRINT tick 2-3 — self-hardening sweep of the un-line-vetted Q37 files (ahead of ARCH cond #3 line-vet).** No new RELAY-directed ARCH input (ARCH at `62eea2f` = Edge-focused); #29 still gated (HB JWKS still spec-only, no impl branch). Used idle ticks to review the two files ARCH hasn't spot-vetted:
+  - **`amqp_consumer.py` — clean.** Exceptions contained (always-ack, no poison-loop), tenant resolution + reply-publish correctly guarded, disabled/absent-dep paths safe. Two non-blocking observations only (speculative bytes-vs-str header coercion; `is_connected` accuracy under `connect_robust` auto-reconnect) — not bugs, not worth churning the gated PR.
+  - **`batch_external.py` — one COMPLIANCE-PATH FLAG for ARCH's line-vet (verified, not a unilateral fix).** Monetary fields are Python **`float`** (`fee_amount`, `vat_amount`) and auto-VAT is `round(fee_amount * 0.075, 2)` — float arithmetic + banker's-rounding on a FIRS/tax path. It's a **fallback** (FANOUT says VAT is caller-supplied; the ERP normally provides `vat_amount`), so low real blast radius, but per the directive's hard "no wrong compliance values" bar it's worth a ruling: **(a)** switch the auto path to `Decimal` + round-half-up, **(b)** drop auto-VAT and require caller-supplied `vat_amount`, or **(c)** keep as-is if auto-VAT is demo-only. **Not changing money logic unilaterally** (ARCH-vetted structure + sensitive). ARCH/Bob to rule; I'll build whichever.
+
+  Watcher re-armed: **15-min active**.
