@@ -532,6 +532,21 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   3. **🟠 #28 relay.db ingest_ledger — BUILT (schema → BOB RATIFY).** New branch **`feat/relay-db-ingest-ledger` (`970b87c`)** off `origin/main`: write-first durable `IngestLedger` (per-tenant SQLite, the all-PG exception) wired before the Step-4 blob commit; idempotency key `PRIMARY KEY(tenant_id, file_sha256)`; duplicate → idempotent replay of the prior result (pipeline NOT re-run); guarded/optional (`RELAY_DB_PATH` empty = disabled = zero behaviour change); **no AMQP** (Phase 2). 78 tests pass. **🔴 NEEDS FROM BOB — ratify the `ingest_ledger` DDL** (sensitive). Two deltas from Frontdoor §6: (a) added `result_json` (the replay payload); (b) `result` CHECK = `pending/processed/error/duplicate` (no `dlq` — no queue here). Full DDL in the seat's report to Bob.
   4. **#19** — already self-merged last session (`0e70322`, main tip). ✓
 
-  **Process:** all three branches will **rebase on `origin/main` before merge**; **ARCH vets** each; sensitive (relay.db DDL, L5 webhook, #29 OAuth) → Bob ratify. **NEEDS FROM ARCH:** vet `de858ea`(#29 VAT) + `921bb34`(#22 Ed25519) + `970b87c`(#28); rule the #22↔#29 jwks_cache de-dup sequencing. **NEEDS FROM BOB:** ratify the relay.db `ingest_ledger` DDL (batch with L5 if convenient).
+  **Process:** all three branches will **rebase on `origin/main` before merge**; **ARCH vets** each; sensitive (relay.db DDL, L5 webhook, #29 OAuth) → Bob ratify. **NEEDS FROM ARCH:** vet `de858ea`(#29 VAT) + `921bb34`(#22 Ed25519) + `970b87c`(#28); rule the #22↔#29 jwks_cache de-dup sequencing. **NEEDS FROM BOB:** ratify the relay.db `ingest_ledger` DDL (batch with L5 if convenient). *(NB: tick45 marked "Relay dormant" — that predates these pushes; flagging so they're picked up.)*
+
+  Watcher re-armed: **15-min active**.
+
+- 2026-06-19 (eve) **🔴 HARMONIZE-ON-CONTACT — Relay #22 Ed25519 verifier DIVERGES from Core #176 (approved). ARCH/HB: lock ONE webhook contract.** Read Core's approved #176 (`feat/core-l5-ed25519-webhook`, `Core/src/api/webhook.py`). It and my Relay `921bb34` verify the SAME HB Ed25519 webhook but with **incompatible contracts** — as-is they'd reject each other's (and HB's real) signatures. Concrete diffs:
+
+  | Axis | **Core #176 (APPROVED)** | **Relay #22 (`921bb34`)** |
+  |---|---|---|
+  | Signing input | `f"{timestamp}.".encode() + body_bytes` (raw body, ts-prefixed; deliberately "= the HMAC scheme so HB swaps only the algorithm") | `"{webhook_id}:{timestamp}:{sha256_hex(body)}"` (digest + webhook_id) |
+  | Signature header | `X-HeartBeat-Signature: ed25519=<base64>` (with `ed25519=` prefix) | `X-HeartBeat-Signature: <base64url>` (no prefix) + `X-HeartBeat-Key-Id` + `X-HeartBeat-Webhook-Id` |
+  | Pubkey source | config **PEM** (`CORE_WEBHOOK_ED25519_PUBKEY`) | **JWKS** fetch by `kid` (reusing the OAuth `JWKSCache`) |
+  | Replay | `X-HeartBeat-Timestamp` window | same |
+
+  **Note the pubkey-source tension:** the ARCH ruling said *"reuse the OAuth JWKS Ed25519 infra"* (→ Relay's JWKS approach), but Core #176 (approved) uses a **config PEM**. Both PRs self-label "PROPOSED, pending HB's published webhook Ed25519 spec." **This is HB's contract to publish + ARCH to lock for BOTH services.** → **NEEDS FROM HB/ARCH: publish the canonical webhook Ed25519 contract — (1) exact signing input, (2) header name + `ed25519=` prefix or not, (3) pubkey source = JWKS-distinct-kid OR config-PEM.** On the lock I align Relay `921bb34` (I have NOT unilaterally rewritten toward a non-final contract — Relay's merge is gated anyway). Recommend: signing input = Core's `{ts}.{body}` (minimal HB change); pubkey source = per the original ruling (JWKS) unless HB prefers PEM — your call.
+
+  **Plus: HB `feat/heartbeat-oauth-jwks` branch now exists** — the JWKS endpoint gating #29 cond-2 is being built. Watching for it to land.
 
   Watcher re-armed: **15-min active**.
