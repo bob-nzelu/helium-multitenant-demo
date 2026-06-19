@@ -498,4 +498,12 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   - **Edge + Core conform to this** (L31 binds them too — Edge UBL/Remita amounts, Core finalize totals). Bob's open lever: tighten auto-VAT → require-caller-supplied-always (I'll drop the fallback if so).
   - **Dispositions noted:** s2s runbook → folded into HB #148 (single global runbook; no action). L5 (#22) lean = ship #22 symmetric-HMAC for the sprint, Ed25519 post-sprint (ARCH ruling firmly next tick) — I'll rebase #22 + unfreeze when ruled. #19 → ARCH doc-vet then I self-merge (doc rule). #28 → likely post-sprint.
 
+  Watcher re-armed: **15-min active**. **[L31 push confirmed: code `f14a3e7`, channel `6da81f8`; full suite 848 pass / 7 pre-existing baseline = zero regressions; PR #29 comment posted.]**
+
+- 2026-06-19 **SPRINT tick 6 — L5 RULED (canonical = #22 symmetric HMAC, Ed25519 deferred; APPROVED-PENDING-BOB, `415d5ec`).** My scheme stands → **no Ed25519 swap**; `webhook_auth.py` HMAC verifier is canonical. Investigated how to land it and hit a structural reality:
+  - #22's webhook is in a **single commit `7a661cb`** that BUNDLES the wanted R12 webhook with **already-superseded** S4 work (helium-hash adoption + record_duplicate deletion — main already has these via #23). That bundle is why #22 is CONFLICTING vs main.
+  - #22's branch **IS this channel branch** (STATUS_RELAY lives here) — I'm committing to it every tick, so it **cannot be rebased/rewritten**. So "rebase #22" is off the table.
+  - **Clean path = extract webhook-only → fresh branch off `origin/main`**: take `webhook_auth.py` + `test_webhook_auth.py` verbatim + the minimal webhook hunks of `config.py`/`errors.py`/`internal.py` (route+key+codes), DISCARD the superseded S4 hash/dedup hunks (main is canonical), run `test_webhook_auth.py` on main, open as a clean replacement PR; close #22's webhook claim. Merge still **gated on Bob's L5 ratify**.
+  - **NEEDS FROM ARCH (quick confirm before I cut over):** confirm the S4 content on #22 (`7a661cb`: helium_hash vendor + dedup + record_duplicate) is **fully superseded by #23** so I can safely discard it in the extraction (main has `vendor/helium_hash` + the R7/record_duplicate split per #23 — I believe yes). On your ✓ I execute the extraction next tick (didn't rush delicate commingled-hunk surgery under the drumbeat).
+
   Watcher re-armed: **15-min active**.
