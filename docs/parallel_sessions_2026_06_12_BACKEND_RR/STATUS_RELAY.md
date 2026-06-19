@@ -550,3 +550,10 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   **Plus: HB `feat/heartbeat-oauth-jwks` branch now exists** — the JWKS endpoint gating #29 cond-2 is being built. Watching for it to land.
 
   Watcher re-armed: **15-min active**.
+
+- 2026-06-20 **HB O3 JWKS landed (branch) → 2 resolutions from reading HB's actual code (`feat/heartbeat-oauth-jwks` `481a484`: `oauth_jwks.py` + `signing_keys.py`).**
+  1. **✅ #29 cond-2 (JWKS shape match) — CONFIRMED ALIGNED, not just provisional.** HB publishes `{"keys":[get_ed25519_public_jwk()]}` as an OKP/Ed25519 JWK; `kid = sha256(raw_32B_pubkey)[:16]`. Relay's `jwks_cache.py` expects **exactly** `{kty:"OKP", crv:"Ed25519", x:<base64url>, kid}` and decodes via `Ed25519PublicKey.from_public_bytes(urlsafe_b64decode(x))`. **They match byte-for-byte** — once HB's JWKS merges+deploys and `RELAY_JWKS_URL` is set, #29's OAuth half lights up with **zero Relay change**. Cond-2 satisfied.
+  2. **✅ Webhook pubkey-source — RESOLVED = JWKS (was the contested axis).** HB's `signing_keys.py` is explicit: HB holds **ONE** Ed25519 keypair signing BOTH the OAuth tokens AND the L5 webhooks, "Relay/Core verify with the **same published public key**" (via JWKS). So the webhook key is JWKS-published, NOT a config PEM. → **Relay #22 (`921bb34`, JWKS-fetch-by-kid) is ALIGNED with HB.** **Core #176 (config-PEM `CORE_WEBHOOK_ED25519_PUBKEY`) is the outlier — it should fetch from JWKS too.** → **NEEDS-FROM-ARCH: reconcile Core #176 to JWKS** (or confirm if HB also exposes a PEM, which its code does not). One key, one JWKS, both verifiers.
+  - **Still open (the remaining webhook axes):** exact **signing input** (Relay `{webhook_id}:{ts}:{sha256(body)}` vs Core `{ts}.{body}`) + **header format** (`ed25519=` prefix? extra `X-HeartBeat-Key-Id`?) — these are HB's **signing**-side contract (likely the separate `fix/heartbeat-webhook-service-config` chip, not this JWKS chip). Pending HB's webhook signer. On lock I align Relay `921bb34`.
+
+  Watcher re-armed: **15-min active**.
