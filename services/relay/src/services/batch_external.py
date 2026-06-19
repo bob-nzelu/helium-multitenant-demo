@@ -21,6 +21,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 from uuid6 import uuid7
@@ -147,7 +148,7 @@ class BatchExternalService:
                 )
                 continue
 
-            fee_amount = _coerce_float(raw_record, "fee_amount", tenant)
+            fee_amount = _coerce_decimal(raw_record, "fee_amount", tenant)
             if fee_amount is None:
                 result.failed.append(
                     BatchFailedEntry(
@@ -158,10 +159,19 @@ class BatchExternalService:
                 )
                 continue
 
-            # Step 2 — VAT auto-compute
-            vat_amount = _coerce_float(raw_record, "vat_amount", tenant)
+            # Step 2 — VAT (L31 monetary & tax precision).
+            # Caller-supplied vat_amount is AUTHORITATIVE — used verbatim, no
+            # re-rounding (no-handwaving). Only the 7.5% fallback is computed,
+            # and it is computed in Decimal + ROUND_HALF_UP and transparently
+            # labelled so a computed value is never presented as document-truth.
+            vat_amount = _coerce_decimal(raw_record, "vat_amount", tenant)
             if vat_amount is None:
-                vat_amount = round(fee_amount * 0.075, 2)
+                vat_amount = (fee_amount * Decimal("0.075")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                vat_source = "auto_7.5pct"
+            else:
+                vat_source = "caller_supplied"
 
             # Step 4 — in-batch dedup by transaction_id
             if txn_id in seen_txn_ids:
@@ -280,6 +290,7 @@ class BatchExternalService:
                     data_uuid=data_uuid,
                     fee_amount=fee_amount,
                     vat_amount=vat_amount,
+                    vat_source=vat_source,
                 )
             )
             logger.info(
@@ -315,29 +326,39 @@ def _coerce_str(record: Dict[str, Any], name: str, tenant: TenantConfig) -> str:
     return str(val).strip()
 
 
-def _coerce_float(record: Dict[str, Any], name: str, tenant: TenantConfig) -> Optional[float]:
-    """Return the field as float, or None if absent."""
+def _coerce_decimal(record: Dict[str, Any], name: str, tenant: TenantConfig) -> Optional[Decimal]:
+    """Return the field as a ``Decimal``, or None if absent/invalid (L31).
+
+    Parses via ``Decimal(str(val))`` so a JSON float like ``7.5`` becomes
+    ``Decimal("7.5")`` exactly (NOT ``Decimal(7.5)``, which would inherit the
+    binary-float error). Money never touches ``float`` on this path.
+    """
     val = _resolve_field(record, name, tenant)
     if val is None:
         return None
     try:
-        return float(val)
-    except (TypeError, ValueError):
+        return Decimal(str(val).strip())
+    except (TypeError, ValueError, ArithmeticError):
         return None
 
 
 def _build_canonical(
     record: Dict[str, Any],
     txn_id: str,
-    fee_amount: float,
-    vat_amount: float,
+    fee_amount: Decimal,
+    vat_amount: Decimal,
     tenant: TenantConfig,
 ) -> Dict[str, Any]:
-    """Build a canonical dict from the raw record, with resolved field names."""
+    """Build a canonical dict from the raw record, with resolved field names.
+
+    Money is serialized as a STRING (``str(Decimal)``) so the canonical blob is
+    JSON-safe and lossless — ``json.dumps`` cannot encode ``Decimal``, and a
+    float round-trip would reintroduce the imprecision L31 forbids.
+    """
     return {
         "transaction_id": txn_id,
-        "fee_amount": fee_amount,
-        "vat_amount": vat_amount,
+        "fee_amount": str(fee_amount),
+        "vat_amount": str(vat_amount),
         "description": _coerce_str(record, "description", tenant),
         "transaction_date": _coerce_str(record, "transaction_date", tenant),
         "branch": _coerce_str(record, "branch", tenant),

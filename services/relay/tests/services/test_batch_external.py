@@ -18,6 +18,9 @@ Uses:
   - TransformaModuleCache loaded via stub (generates real IRN/QR)
 """
 
+import json
+from decimal import Decimal
+
 import pytest
 
 from src.core.irn import IRNGenerator
@@ -370,6 +373,69 @@ class TestBatchVATCompute:
             trace_id="trc-round",
         )
         assert result.processed[0].vat_amount == pytest.approx(25.0, abs=0.01)
+
+
+# ── L31 monetary & tax precision (Decimal, ROUND_HALF_UP, vat_source) ──────────
+
+
+class TestBatchL31Precision:
+    @pytest.mark.asyncio
+    async def test_money_is_decimal_not_float(self, batch_service, tenant):
+        result = await batch_service.process_batch(
+            records=[_record(fee="1000.00")],
+            batch_id="BL31", tenant=tenant, trace_id="trc-l31a",
+        )
+        entry = result.processed[0]
+        assert isinstance(entry.fee_amount, Decimal)
+        assert isinstance(entry.vat_amount, Decimal)
+
+    @pytest.mark.asyncio
+    async def test_auto_vat_quantized_2dp_and_labeled(self, batch_service, tenant):
+        result = await batch_service.process_batch(
+            records=[_record(fee="1000.00")],  # no vat → auto 7.5%
+            batch_id="BL31b", tenant=tenant, trace_id="trc-l31b",
+        )
+        entry = result.processed[0]
+        assert entry.vat_amount == Decimal("75.00")
+        assert entry.vat_source == "auto_7.5pct"
+
+    @pytest.mark.asyncio
+    async def test_auto_vat_uses_round_half_up_not_bankers(self, batch_service, tenant):
+        # 13.40 * 0.075 = 1.00500 exactly. ROUND_HALF_UP → 1.01;
+        # banker's (ROUND_HALF_EVEN) → 1.00; float round() → 1.0.
+        # Asserting 1.01 pins the L31-mandated rounding mode.
+        result = await batch_service.process_batch(
+            records=[_record(fee="13.40")],
+            batch_id="BL31c", tenant=tenant, trace_id="trc-l31c",
+        )
+        entry = result.processed[0]
+        assert entry.vat_amount == Decimal("1.01")
+        assert entry.vat_amount != Decimal("1.00")
+
+    @pytest.mark.asyncio
+    async def test_caller_supplied_vat_is_verbatim(self, batch_service, tenant):
+        # Caller value is authoritative — used as-is, NOT re-quantized/rounded.
+        result = await batch_service.process_batch(
+            records=[_record(fee="1000.00", vat="50.005")],
+            batch_id="BL31d", tenant=tenant, trace_id="trc-l31d",
+        )
+        entry = result.processed[0]
+        assert entry.vat_amount == Decimal("50.005")  # not rounded to 50.00/50.01
+        assert entry.vat_source == "caller_supplied"
+
+    @pytest.mark.asyncio
+    async def test_response_serializes_money_as_json_string(self, batch_service, tenant):
+        # L31: Decimal money → JSON string (no float reintroduced on the wire).
+        result = await batch_service.process_batch(
+            records=[_record(fee="1000.00")],
+            batch_id="BL31e", tenant=tenant, trace_id="trc-l31e",
+        )
+        payload = json.loads(result.to_response().model_dump_json())
+        proc = payload["processed"][0]
+        assert proc["fee_amount"] == "1000.00"
+        assert proc["vat_amount"] == "75.00"
+        assert proc["vat_source"] == "auto_7.5pct"
+        assert isinstance(proc["fee_amount"], str)
 
 
 # ── Tenant FIRS Service ID Injection (Gap #8) ─────────────────────────────────

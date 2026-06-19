@@ -4,6 +4,7 @@ API Pydantic Models
 Request/response schemas for Relay-API endpoints.
 """
 
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -13,14 +14,24 @@ from pydantic import BaseModel, Field
 
 
 class BatchProcessedEntry(BaseModel):
-    """One successfully fiscalized invoice in a batch ingest response."""
+    """One successfully fiscalized invoice in a batch ingest response.
+
+    L31 (monetary & tax precision): money is ``Decimal``, never ``float`` — it
+    serializes to a JSON string (e.g. ``"7.50"``) so no float imprecision is
+    reintroduced on the wire. ``vat_source`` transparently labels whether VAT
+    was the caller's authoritative value or Relay's 7.5% fallback.
+    """
 
     transaction_id: str = Field(description="ERP's unique reference, echoed")
     irn: str = Field(description="Invoice Reference Number (FIRS-recognised)")
     qr_code: str = Field(description="QR code for this invoice, Base64-encoded")
     data_uuid: str = Field(description="Relay internal storage handle")
-    fee_amount: float = Field(description="Echoed invoice amount in NGN")
-    vat_amount: float = Field(description="Echoed VAT in NGN (auto-computed at 7.5% if not supplied)")
+    fee_amount: Decimal = Field(description="Echoed invoice amount in NGN (Decimal, JSON string)")
+    vat_amount: Decimal = Field(description="VAT in NGN (Decimal, JSON string)")
+    vat_source: str = Field(
+        default="caller_supplied",
+        description="caller_supplied (authoritative, verbatim) | auto_7.5pct (Relay fallback, ROUND_HALF_UP)",
+    )
 
 
 class BatchDuplicateEntry(BaseModel):
