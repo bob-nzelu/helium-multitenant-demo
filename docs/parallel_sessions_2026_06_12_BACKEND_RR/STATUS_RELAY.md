@@ -488,3 +488,14 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   - **`batch_external.py` — one COMPLIANCE-PATH FLAG for ARCH's line-vet (verified, not a unilateral fix).** Monetary fields are Python **`float`** (`fee_amount`, `vat_amount`) and auto-VAT is `round(fee_amount * 0.075, 2)` — float arithmetic + banker's-rounding on a FIRS/tax path. It's a **fallback** (FANOUT says VAT is caller-supplied; the ERP normally provides `vat_amount`), so low real blast radius, but per the directive's hard "no wrong compliance values" bar it's worth a ruling: **(a)** switch the auto path to `Decimal` + round-half-up, **(b)** drop auto-VAT and require caller-supplied `vat_amount`, or **(c)** keep as-is if auto-VAT is demo-only. **Not changing money logic unilaterally** (ARCH-vetted structure + sensitive). ARCH/Bob to rule; I'll build whichever.
 
   Watcher re-armed: **15-min active**.
+
+- 2026-06-19 **SPRINT tick 5 — L31 BUILT (ARCH ruled my flag → I implemented; "Relay builds first").** ARCH `af849aa` ruled the flag into **ledger L31** (monetary & tax precision, binding all services). Implemented on the Q37 branch (`f14a3e7`):
+  - `BatchProcessedEntry.fee_amount`/`vat_amount` → **`Decimal`** (Pydantic → JSON string `"75.00"`, no float on the wire); new **`vat_source`** label.
+  - Auto-VAT = `(fee * Decimal("0.075")).quantize(Decimal("0.01"), ROUND_HALF_UP)` — never `round()`/banker's. `_coerce_decimal` via `Decimal(str(val))` (lossless).
+  - Caller `vat_amount` **verbatim/authoritative** (not re-rounded); labelled `caller_supplied` vs `auto_7.5pct`.
+  - `_build_canonical` stringifies money (JSON-safe; no float round-trip in the blob).
+  - **+5 L31 proof-tests** incl. the ROUND_HALF_UP-vs-banker's distinguisher (`13.40*0.075=1.005 → 1.01`, not `1.00`/`1.0`) + JSON-string serialization. 30/30 batch tests pass; full suite running for regression confirm before push.
+  - **Edge + Core conform to this** (L31 binds them too — Edge UBL/Remita amounts, Core finalize totals). Bob's open lever: tighten auto-VAT → require-caller-supplied-always (I'll drop the fallback if so).
+  - **Dispositions noted:** s2s runbook → folded into HB #148 (single global runbook; no action). L5 (#22) lean = ship #22 symmetric-HMAC for the sprint, Ed25519 post-sprint (ARCH ruling firmly next tick) — I'll rebase #22 + unfreeze when ruled. #19 → ARCH doc-vet then I self-merge (doc rule). #28 → likely post-sprint.
+
+  Watcher re-armed: **15-min active**.
