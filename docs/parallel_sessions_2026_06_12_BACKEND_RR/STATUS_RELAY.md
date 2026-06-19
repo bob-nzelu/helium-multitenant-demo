@@ -454,3 +454,21 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   - **NEEDS FROM ARCH/HB (global runbook):** the go-live cutover runbook must list **BOTH** operator pastes — `CORE_HEARTBEAT_S2S_SIGNING_KEY` **and** `RELAY_S2S_SIGNING_KEY` — and **HB owns generating BOTH** per-service keys at real-auth startup (it already logs them at WARNING per `HMAC_S2S_MIGRATION_SPEC §5`). Not blocking today (EC2 still `MOCK_AUTH=true`, consistent stack); required + sequenced at the Q35/MOCK_AUTH=false flip.
 
   Watcher re-armed: 30-min active.
+
+## WILD SPRINT — ACK + plan (2026-06-19)
+
+**ACKED `DIRECTIVE_WILD_SPRINT_2026_06_19.md`. Watcher → 15-min** (fetch both repos → re-read channel → act → push). Standing rules folded: submit-as-you-land/small chips/push-now; harmonize-on-contact; consolidate toward trunk; no-handwaving absolute; sensitive class (DDL/auth/cross-service/EC2) still ARCH-vet+Bob-ratify; build to already-coded caller shapes (FANOUT), no redesign.
+
+**RELAY backlog (BRANCH_MAP) + my sprint disposition — goal: shrink the 5 open PRs:**
+
+| PR | What | Disposition this sprint |
+|----|------|-------------------------|
+| **#29** | Q37 ext-ingest + L30 + alg-guard + cutover runbook | APPROVED (L30) / cond #1 closed; **cond #2 gated on HB JWKS**. MERGEABLE + null-safe. Hold for HB O3 + Bob final-merge (sensitive). Keep green; reconcile OAuth pieces when JWKS lands. |
+| **#10** | Phase-1b abuse middleware (+ a Keel introspect/audit commit) | **CLEAR IT** (directive §3) — investigating supersession vs main (CSSV1 #23–#27 merged since); merge the still-valid part or close if superseded. First chip. |
+| **#22** | S4 R12 signed webhook | Frozen on **L5 (still ⚠ UNHARMONIZED — harmonization task #1)** + now CONFLICTING vs main. Scheme (2-header HMAC vs #68 Ed25519) is a cross-service contract = **not mine to unilaterally rule**. Surfacing to drive the L5 decision; will adapt (Relay can do Ed25519) + rebase once ruled. No redesign. |
+| **#19** | Frontdoor architecture doc (+ relay.db proposal) | Docs, MERGEABLE, marked "pending Bob review". Marking ready + flagging for the consolidation merge. Overlaps #28 on relay.db. |
+| **#28** | Q28 relay.db durable-ingestion proposal | Sensitive (schema proposal) — **ARCH vet + Bob ratify**. Surfacing for a sprint vet; holding build until ratified. |
+
+**This tick's chip:** clear #10 (disposition call, then merge-or-close). Next: drive L5 (#22), tee up #19/#28 for ARCH. **Sensitive items (#29 merge, #28 schema, #22 scheme) explicitly NOT self-merged** — they ride ARCH's 15-min vet.
+
+  Watcher re-armed: **15-min active** (WILD SPRINT cadence).
