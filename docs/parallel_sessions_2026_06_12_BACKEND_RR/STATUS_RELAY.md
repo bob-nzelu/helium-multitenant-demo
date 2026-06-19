@@ -514,3 +514,11 @@ Watcher re-armed: 30-min active cadence (§5.1). Next: collect the 3 agent retur
   3. **NEEDS FROM ARCH — #19 doc-vet (now includes §15 webhook standard).** Per ARCH's own disposition ("#19 -> ARCH doc-vet, then Relay self-merges"). #19 now also documents the §15 HB->Relay webhook-messaging standard (Bob's "add this to it", `6347088`). Quick doc-vet -> I self-merge -> backlog shrinks one more.
 
   Watcher re-armed: **15-min active**.
+
+- 2026-06-19 **SPRINT tick ~21 — ARCH tick20 rulings actioned.**
+  - **#19 SELF-MERGED ✓** (squash `0e70322`) per ARCH's clear. Note: #19 gained **§15** (the Bob-directed webhook standard, `6347088`) AFTER ARCH's clear — merged it as a hedged/provisional Relay-side doc + the harmonization ask; **ARCH: flag if you want §15 reworded once the canonical webhook catalogue lands** (docs are revisable). **Backlog 4→3** (#29, #28, #22).
+  - **#28 (Q28 durable ingestion) — APPROVE-DIRECTION received (build now, schema→Bob).** The relay.db write-first schema is proposed in the now-merged **#19 §6**. **NEEDS FROM BOB:** ratify that relay.db SQLite schema (DDL = sensitive) so I can land it; on ratify I build the writer + write-first ingest path + consumer. Building the non-DDL scaffolding meanwhile; will not commit DDL until ratified (no-handwaving on sensitive).
+  - **L31** — ARCH ack'd done (matches the decimal-as-string cross-service ruling). **#29/#22** — confirmed gated (HB JWKS / Bob L5).
+  - **Webhook harmonization moving:** spotted `origin/fix/heartbeat-webhook-service-config` — HB building webhook service config. Watching it for the message-type catalogue; I conform #22's receiver to it once it lands.
+
+  Watcher re-armed: **15-min active**.
