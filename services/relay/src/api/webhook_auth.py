@@ -1,10 +1,10 @@
 """
-Ed25519-signed webhook receiver verifier — L5 (reworked from symmetric HMAC).
+Ed25519-signed webhook receiver verifier — L5 (LOCKED contract).
 
-HeartBeat (producer) SIGNS each webhook with **Ed25519**, reusing its OAuth
-JWKS Ed25519 infrastructure and publishing the webhook public key. Relay
-(consumer) VERIFIES that signature here against HB's published webhook public
-key, fetched by ``kid`` via the shared :class:`~src.core.jwks_cache.JWKSCache`.
+HeartBeat (producer) SIGNS each webhook with **Ed25519**, reusing the SAME
+Ed25519 signing key it publishes on its OAuth JWKS. Relay (consumer) VERIFIES
+that signature here against HB's published Ed25519 public key(s), fetched via
+the shared :class:`~src.core.jwks_cache.JWKSCache`.
 
 This REPLACES the earlier symmetric, shared-secret receiver (the 2-header /
 ``sha256=`` HMAC ``verify_webhook_request`` that shipped on
@@ -16,10 +16,9 @@ signing key. Verification is asymmetric only.
 
 Reuse (no second JWKS/Ed25519 fetcher is written here):
     - :class:`src.core.jwks_cache.JWKSCache` — fetches Ed25519 public keys
-      from HB's JWKS by ``kid`` (1h TTL, online rotation, fail-soft).
-    - The Ed25519 verify pattern + base64url-decode helper are modelled on
-      ``src.core.oauth_validator`` (``pub_key.verify(raw_sig, signing_input)``
-      + ``InvalidSignature`` handling).
+      from HB's JWKS (1h TTL, online rotation, fail-soft).
+    - The Ed25519 verify pattern is modelled on ``src.core.oauth_validator``
+      (``pub_key.verify(raw_sig, signing_input)`` + ``InvalidSignature``).
 
 Layout:
     - :class:`WebhookVerifier` is the verifier. It takes a ``JWKSCache`` and a
@@ -34,52 +33,43 @@ Layout:
       ``httpx.AsyncClient`` (used by the lifespan).
 
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  NEEDS-FROM-HB  —  PROVISIONAL CONTRACT (not finalized; do NOT treat as   ║
-║                    settled until HeartBeat publishes the webhook spec).   ║
+║  LOCKED L5 WEBHOOK CONTRACT  (CONTRACT_LEDGER L5, 2026-06-20)             ║
 ╠══════════════════════════════════════════════════════════════════════════╣
-║ Everything below is Relay's *best-guess* placeholder so the receiver is   ║
-║ buildable + testable TODAY. Each item is owned by HeartBeat and MUST be   ║
-║ reconciled before this path is enabled against a real HB producer. The    ║
-║ constants are centralised (module-level) precisely so a one-line change   ║
-║ reconciles each one once HB confirms.                                     ║
+║ ARCH locked this against HeartBeat #182's signer (ground-truthed). This   ║
+║ verifier MUST accept exactly the signatures HB produces. The constants    ║
+║ below are the single source of truth for the wire format.                 ║
 ║                                                                           ║
-║ 1. EXACT SIGNING INPUT (the bytes HB feeds to Ed25519.sign).              ║
-║    Provisional: the ASCII bytes of                                        ║
-║        f"{webhook_id}:{timestamp}:{sha256_hex(body)}"                     ║
-║    i.e. ``"<X-HeartBeat-Webhook-Id>:<X-HeartBeat-Timestamp>:"`` followed  ║
-║    by the lowercase hex SHA-256 of the EXACT raw request body bytes.      ║
-║    OPEN: does HB sign the raw body directly (like the old HMAC receiver,  ║
-║    which signed ``f"{ts}.".encode()+body``) or this digest-of-body form?  ║
-║    OPEN: field order, separator char (':' vs '.'), and whether            ║
-║    ``webhook_id`` participates at all.                                    ║
+║ 1. SIGNING INPUT (the bytes HB feeds to Ed25519.sign):                    ║
+║        f"{unix_ts}.".encode("utf-8") + raw_body_bytes                     ║
+║    i.e. the ASCII of the unix-epoch-seconds timestamp, then a literal     ║
+║    ``.``, then the EXACT raw request body bytes. NO webhook_id, NO        ║
+║    sha256 digest, NO colons.                                             ║
 ║                                                                           ║
-║ 2. EXACT HEADER NAMES.                                                    ║
-║    Provisional:                                                           ║
-║        X-HeartBeat-Key-Id     → JWKS ``kid`` of the webhook signing key   ║
-║        X-HeartBeat-Timestamp  → Unix epoch seconds (ASCII int)            ║
-║        X-HeartBeat-Signature  → base64url(Ed25519 signature), no padding  ║
-║        X-HeartBeat-Webhook-Id → opaque per-delivery id (in signing input) ║
-║    OPEN: HB may keep the old ``X-HeartBeat-Signature`` name but DROP the  ║
-║    ``sha256=`` prefix (this scheme has no prefix), may rename Key-Id to   ║
-║    ``X-HeartBeat-Kid``, and may not send a Webhook-Id at all.             ║
+║ 2. HEADERS:                                                               ║
+║        X-HeartBeat-Signature: ed25519=<standard-base64 signature>        ║
+║        X-HeartBeat-Timestamp: <unix epoch seconds, ASCII int>            ║
+║    The signature value carries a literal ``ed25519=`` prefix; after       ║
+║    stripping it, the remainder is STANDARD base64 (``base64.b64decode``,  ║
+║    matching Core #176 — NOT urlsafe / no-pad). There is NO Key-Id header  ║
+║    and NO Webhook-Id header in the locked contract.                       ║
 ║                                                                           ║
-║ 3. WHERE HB PUBLISHES THE WEBHOOK PUBLIC KEY.                             ║
-║    Provisional: the SAME ``/.well-known/jwks.json`` as the OAuth signer,  ║
-║    distinguished by a distinct ``kid`` and ``use:"sig"`` (so ``jwks_url`` ║
-║    is reused and ``RELAY_WEBHOOK_JWKS_URL`` is left empty).               ║
-║    OPEN: HB may instead expose a DEDICATED webhook-keys endpoint; if so,  ║
-║    set ``RELAY_WEBHOOK_JWKS_URL`` to it (already plumbed in config.py).   ║
+║ 3. REPLAY WINDOW: 5 minutes (300s) absolute skew on the timestamp.        ║
 ║                                                                           ║
-║ 4. (separate harmonization, NOT this task) the MESSAGE-TYPE CATALOGUE —   ║
+║ 4. KEY RESOLUTION: no kid travels in the headers, so the key cannot be    ║
+║    looked up by a header kid. HB publishes ONE Ed25519 signing key on     ║
+║    ``/.well-known/jwks.json`` (rarely 2 during rotation). Relay fetches   ║
+║    the JWKS and tries verifying against EACH published Ed25519 key,       ║
+║    accepting if ANY verifies (``JWKSCache.get_all_keys()``).             ║
+║                                                                           ║
+║ 5. (separate harmonization, NOT this task) the MESSAGE-TYPE CATALOGUE —   ║
 ║    what message kinds HB pushes and how Relay dispatches them. The route  ║
-║    below verifies + 200s only; dispatch is a documented TODO there.       ║
+║    verifies + 200s only; dispatch is a documented TODO there.             ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import logging
 import time
 from typing import Optional
@@ -94,59 +84,48 @@ from ..errors import WebhookSignatureError
 logger = logging.getLogger(__name__)
 
 
-# ── PROVISIONAL contract constants (see NEEDS-FROM-HB in the module docstring) ──
+# ── LOCKED contract constants (CONTRACT_LEDGER L5, 2026-06-20) ──────────────
 #
-# These are the single source of truth for the provisional wire format. When
-# HeartBeat finalizes the webhook signing spec, reconcile by editing HERE.
+# Single source of truth for the wire format. Locked against HB #182's signer.
 
-#: Header carrying the JWKS ``kid`` of the webhook signing key. PROVISIONAL.
-HEADER_KEY_ID = "x-heartbeat-key-id"
-#: Header carrying the Unix-epoch-seconds timestamp (ASCII int). PROVISIONAL.
+#: Header carrying the Unix-epoch-seconds timestamp (ASCII int).
 HEADER_TIMESTAMP = "x-heartbeat-timestamp"
-#: Header carrying base64url(Ed25519 signature), no padding. PROVISIONAL.
+#: Header carrying ``ed25519=<standard-base64 signature>``.
 HEADER_SIGNATURE = "x-heartbeat-signature"
-#: Header carrying the opaque per-delivery webhook id. PROVISIONAL.
-HEADER_WEBHOOK_ID = "x-heartbeat-webhook-id"
+#: Literal prefix the signature header value must carry, before the base64.
+SIGNATURE_SCHEME_PREFIX = "ed25519="
 
 
-def _b64url_decode(segment: str) -> bytes:
-    """Decode a base64url segment (issuer may omit padding).
-
-    Modelled on ``src.core.oauth_validator._b64url_decode`` — the same helper
-    the OAuth path uses to decode the JWT signature segment, kept byte-for-byte
-    compatible so both paths agree on the encoding HB emits.
-    """
-    padded = segment + "=" * (-len(segment) % 4)
-    return base64.urlsafe_b64decode(padded.encode("ascii"))
-
-
-def _build_signing_input(webhook_id: str, timestamp: str, body_bytes: bytes) -> bytes:
+def _build_signing_input(timestamp: str, body_bytes: bytes) -> bytes:
     """Reconstruct the exact bytes HeartBeat signed.
 
-    PROVISIONAL (NEEDS-FROM-HB item #1): the ASCII bytes of
-    ``f"{webhook_id}:{timestamp}:{sha256_hex(body)}"``. The body is reduced to
-    its lowercase-hex SHA-256 so the signed message is bounded regardless of
-    payload size; HB MUST sign the identical construction.
+    LOCKED (CONTRACT_LEDGER L5, 2026-06-20): the UTF-8 ASCII of the
+    unix-epoch-seconds timestamp, a literal ``.``, then the EXACT raw request
+    body bytes — ``f"{timestamp}.".encode("utf-8") + body_bytes``. No
+    webhook_id, no sha256 digest, no colons. HB signs this identical
+    construction over the raw body.
     """
-    body_hash = hashlib.sha256(body_bytes).hexdigest()
-    return f"{webhook_id}:{timestamp}:{body_hash}".encode("ascii")
+    return f"{timestamp}.".encode("utf-8") + body_bytes
 
 
 class WebhookVerifier:
     """Verifies an inbound HeartBeat webhook's **Ed25519** signature.
 
-    The webhook public key is fetched by ``kid`` from HB's published JWKS via
-    the shared :class:`JWKSCache` (no second fetcher). On ANY failure a
+    The webhook public key(s) are fetched from HB's published JWKS via the
+    shared :class:`JWKSCache` (no second fetcher). The locked contract carries
+    no kid header, so verification is attempted against EVERY published
+    Ed25519 key and succeeds if ANY one verifies. On ANY failure a
     :class:`WebhookSignatureError` (HTTP 401) is raised — the route lets it
     bubble to the global ``relay_error_handler``.
 
     Parameters
     ----------
     jwks_cache:
-        Shared :class:`JWKSCache` pointed at HB's webhook-key JWKS URL.
+        Shared :class:`JWKSCache` pointed at HB's JWKS URL (the same JWKS that
+        publishes the OAuth Ed25519 signing key).
     replay_window_s:
         Max allowed absolute skew (seconds) between the signed timestamp and
-        ``now`` before the delivery is rejected as a replay. PROVISIONAL.
+        ``now`` before the delivery is rejected as a replay. LOCKED at 300s.
     """
 
     def __init__(self, jwks_cache: JWKSCache, replay_window_s: int = 300) -> None:
@@ -160,13 +139,12 @@ class WebhookVerifier:
         :class:`WebhookSignatureError`; the client-facing message is generic
         so a probe cannot distinguish the failure modes):
 
-            1. ``kid`` header present.
-            2. ``timestamp`` header present + integer.
-            3. ``signature`` header present.
-            4. timestamp inside the replay window.
-            5. webhook public key for ``kid`` resolvable from the JWKS.
-            6. signature base64url-decodes.
-            7. Ed25519 verify of the signature over the reconstructed input.
+            1. ``timestamp`` header present + integer.
+            2. ``signature`` header present + ``ed25519=`` prefix + base64.
+            3. timestamp inside the replay window.
+            4. at least one published Ed25519 key resolvable from the JWKS.
+            5. Ed25519 verify of the signature over the reconstructed input
+               against EACH published key — accept if ANY verifies.
 
         On success returns ``None`` and the handler runs. Body bytes are read
         from ``request.state.raw_body`` (populated by ``BodyCacheMiddleware``)
@@ -175,22 +153,27 @@ class WebhookVerifier:
         """
         headers = request.headers
 
-        # ── Step 1: kid header ───────────────────────────────────────────
-        kid = headers.get(HEADER_KEY_ID, "")
-        if not kid:
-            raise WebhookSignatureError(reason="missing key-id header")
-
-        # ── Step 2: timestamp header present + integer ───────────────────
+        # ── Step 1: timestamp header present + integer ───────────────────
         timestamp_raw = headers.get(HEADER_TIMESTAMP, "")
         if not timestamp_raw or not timestamp_raw.lstrip("-").isdigit():
             raise WebhookSignatureError(reason="missing or non-integer timestamp")
 
-        # ── Step 3: signature header present ─────────────────────────────
-        signature_b64 = headers.get(HEADER_SIGNATURE, "")
-        if not signature_b64:
+        # ── Step 2: signature header present + ed25519= prefix + base64 ──
+        signature_header = headers.get(HEADER_SIGNATURE, "")
+        if not signature_header:
             raise WebhookSignatureError(reason="missing signature header")
+        if not signature_header.startswith(SIGNATURE_SCHEME_PREFIX):
+            raise WebhookSignatureError(
+                reason="signature header missing ed25519= prefix"
+            )
+        signature_b64 = signature_header[len(SIGNATURE_SCHEME_PREFIX):]
+        try:
+            # Standard base64 (NOT urlsafe / no-pad) — matches Core #176.
+            raw_sig = base64.b64decode(signature_b64, validate=True)
+        except Exception as exc:
+            raise WebhookSignatureError(reason="signature decode failed") from exc
 
-        # ── Step 4: timestamp inside replay window ───────────────────────
+        # ── Step 3: timestamp inside replay window ───────────────────────
         timestamp = int(timestamp_raw)
         now = int(time.time())
         if abs(now - timestamp) > self._replay_window_s:
@@ -200,44 +183,46 @@ class WebhookVerifier:
             )
             raise WebhookSignatureError(reason="timestamp outside replay window")
 
-        # ── Step 5: resolve webhook public key by kid ────────────────────
+        # ── Step 4: resolve the published Ed25519 key(s) ─────────────────
+        # The locked contract sends no kid, so we cannot look a single key up.
+        # Fetch ALL published Ed25519 keys (HB publishes one, rarely two during
+        # rotation) and try each below.
         try:
-            pub_key = await self._cache.get_key(kid)
+            pub_keys = await self._cache.get_all_keys()
         except Exception as exc:
             # Cold-start JWKS fetch failure — fail closed (401), never admit
             # an unverified webhook. JWKSCache itself is fail-soft on refresh.
             logger.warning("Webhook rejected — JWKS fetch failed: %s", exc)
             raise WebhookSignatureError(reason="jwks fetch failed") from exc
-        if pub_key is None:
-            raise WebhookSignatureError(reason=f"kid={kid!r} not in webhook JWKS")
+        if not pub_keys:
+            raise WebhookSignatureError(reason="no Ed25519 keys in webhook JWKS")
 
-        # ── Step 6: decode signature ─────────────────────────────────────
-        try:
-            raw_sig = _b64url_decode(signature_b64)
-        except Exception as exc:
-            raise WebhookSignatureError(reason="signature decode failed") from exc
-
-        # ── Step 7: Ed25519 verify over the reconstructed signing input ──
-        webhook_id = headers.get(HEADER_WEBHOOK_ID, "")
+        # ── Step 5: Ed25519 verify over the reconstructed signing input ──
+        # Accept if ANY published key verifies the signature.
         body_bytes = await self._read_body(request)
-        signing_input = _build_signing_input(webhook_id, timestamp_raw, body_bytes)
-        try:
-            pub_key.verify(raw_sig, signing_input)
-        except InvalidSignature as exc:
-            logger.warning(
-                "Webhook rejected — Ed25519 signature mismatch (kid=%s, ts=%s).",
-                kid, timestamp_raw,
-            )
-            raise WebhookSignatureError(reason="ed25519 signature mismatch") from exc
-        except Exception as exc:
-            raise WebhookSignatureError(
-                reason=f"ed25519 verify error: {exc}"
-            ) from exc
+        signing_input = _build_signing_input(timestamp_raw, body_bytes)
+        for pub_key in pub_keys:
+            try:
+                pub_key.verify(raw_sig, signing_input)
+            except InvalidSignature:
+                continue  # try the next published key
+            except Exception as exc:
+                # A non-signature verify error (e.g. malformed key) is unusual;
+                # log and keep trying the remaining keys rather than admitting.
+                logger.warning("Webhook key verify raised (non-signature): %s", exc)
+                continue
+            else:
+                logger.debug(
+                    "Webhook Ed25519 signature verified — ts=%s", timestamp_raw,
+                )
+                return
 
-        logger.debug(
-            "Webhook Ed25519 signature verified — kid=%s webhook_id=%s ts=%s",
-            kid, webhook_id or "(none)", timestamp_raw,
+        logger.warning(
+            "Webhook rejected — Ed25519 signature did not match any of %d "
+            "published key(s) (ts=%s).",
+            len(pub_keys), timestamp_raw,
         )
+        raise WebhookSignatureError(reason="ed25519 signature mismatch")
 
     @staticmethod
     async def _read_body(request: Request) -> bytes:
@@ -258,9 +243,9 @@ def build_webhook_verifier(
     """Construct a :class:`WebhookVerifier` + its backing :class:`JWKSCache`.
 
     The JWKS URL is ``RELAY_WEBHOOK_JWKS_URL`` if set, else falls back to the
-    base ``RELAY_JWKS_URL`` (the same-JWKS-distinct-kid hypothesis — see
-    NEEDS-FROM-HB item #3). Called once at startup by ``create_app``'s
-    lifespan with the shared httpx client.
+    base ``RELAY_JWKS_URL`` (the same JWKS that publishes HB's OAuth Ed25519
+    signing key — the locked contract reuses that one key). Called once at
+    startup by ``create_app``'s lifespan with the shared httpx client.
     """
     jwks_url = config.webhook_jwks_url or config.jwks_url
     cache = JWKSCache(jwks_url=jwks_url, http_client=http_client)
@@ -291,8 +276,7 @@ __all__ = [
     "WebhookVerifier",
     "build_webhook_verifier",
     "get_webhook_verifier",
-    "HEADER_KEY_ID",
     "HEADER_TIMESTAMP",
     "HEADER_SIGNATURE",
-    "HEADER_WEBHOOK_ID",
+    "SIGNATURE_SCHEME_PREFIX",
 ]
