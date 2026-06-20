@@ -449,9 +449,13 @@ class TestRouteWiringAndAppHandler:
 #
 # Proves the guard fires through a real sensitive mutating route + the app's
 # exception handler, that a stale axis blocks the request BEFORE the handler
-# (no relay.finalize.accepted lifecycle event emitted = not forwarded), and that
+# (no Core forward = not forwarded; the finalize handler never runs), and that
 # a matching axis passes through to a 202. The finalize route is chosen because
 # its JSON body is HMAC-signable (unlike multipart ingest).
+#
+# Q24 (ARCH tick56): Relay is ingress-only — Core emits the finalize.accepted
+# lifecycle event on its own stream. There is no Relay-side publisher to assert,
+# so these tests prove the drift gate via the HTTP status (409 vs 202).
 
 
 class TestFinalizeRouteDriftEndToEnd:
@@ -493,25 +497,19 @@ class TestFinalizeRouteDriftEndToEnd:
         return headers
 
     @pytest.mark.asyncio
-    async def test_stale_policy_axis_blocks_finalize_409_no_event(self):
+    async def test_stale_policy_axis_blocks_finalize_409(self):
         import json
 
         from asgi_lifespan import LifespanManager
 
         from src.api.app import create_app
-        from src.services.finalize import FinalizeService
-        from src.services.lifecycle import RecordingLifecyclePublisher
 
         app = create_app(
             config=self._config(), api_key_secrets={self.TEST_API_KEY: self.TEST_SECRET}
         )
         async with LifespanManager(app):
-            # Seed Relay's authoritative policy_revision + a recording publisher
-            # so we can prove the lifecycle event is NOT emitted on drift.
+            # Seed Relay's authoritative policy_revision so the client axis drifts.
             app.state.config_cache._config["policy_revision"] = "server-rev-9"
-            recorder = RecordingLifecyclePublisher()
-            app.state.lifecycle_publisher = recorder
-            app.state.finalize_service = FinalizeService(app.state.core, recorder)
 
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -530,8 +528,6 @@ class TestFinalizeRouteDriftEndToEnd:
             "expected": "server-rev-9",
             "got": "client-rev-8",
         }
-        # Not forwarded: the finalize handler never ran, so no lifecycle event.
-        assert recorder.events == []
 
     @pytest.mark.asyncio
     async def test_matching_policy_axis_passes_finalize_202(self):
@@ -540,17 +536,12 @@ class TestFinalizeRouteDriftEndToEnd:
         from asgi_lifespan import LifespanManager
 
         from src.api.app import create_app
-        from src.services.finalize import FinalizeService
-        from src.services.lifecycle import RecordingLifecyclePublisher
 
         app = create_app(
             config=self._config(), api_key_secrets={self.TEST_API_KEY: self.TEST_SECRET}
         )
         async with LifespanManager(app):
             app.state.config_cache._config["policy_revision"] = "server-rev-9"
-            recorder = RecordingLifecyclePublisher()
-            app.state.lifecycle_publisher = recorder
-            app.state.finalize_service = FinalizeService(app.state.core, recorder)
 
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -564,5 +555,3 @@ class TestFinalizeRouteDriftEndToEnd:
 
         assert resp.status_code == 202, resp.text
         assert resp.json()["trace_id"] == "018f-fresh-1"
-        # Forwarded: the finalize handler ran → one lifecycle event emitted.
-        assert len(recorder.events) == 1

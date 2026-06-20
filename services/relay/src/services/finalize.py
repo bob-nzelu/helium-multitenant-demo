@@ -26,12 +26,14 @@ Idempotency model (two layers, mirrors SBS relay.py:1114-1175):
     the terminal 409. We key both on ``(operation, ref|trace_id)``.
 
 Relay holds no per-document store today (the authoritative ``ingesters[]`` /
-``finalizer`` lifecycle lives in Core — §B-IngestFinalize). So Relay's job is:
-forward the finalize trigger + ``trace_id`` to Core (HTTP, discretionary ruling
-(c)), emit ``relay.finalize.accepted`` via the lifecycle seam, and be
-idempotent-per-(ref|trace_id) so retries are safe. The in-process idempotency
-cache is intentionally simple (single-instance); a shared store is an S3
-hardening concern, not Monday's bar.
+``finalizer`` lifecycle lives in Core — §B-IngestFinalize). Relay is
+ingress-only (Q24, ARCH tick56): its job is to forward the finalize trigger +
+``trace_id`` to Core (HTTP, discretionary ruling (c)) and be
+idempotent-per-(ref|trace_id) so retries are safe. The finalize WORK is Core's,
+so **Core** emits the ``finalize.accepted`` lifecycle event on its own stream —
+Relay does NOT publish lifecycle events. The in-process idempotency cache is
+intentionally simple (single-instance); a shared store is an S3 hardening
+concern, not Monday's bar.
 """
 
 import logging
@@ -41,15 +43,16 @@ from typing import Any, Dict, Optional
 from uuid6 import uuid7
 
 from ..errors import AlreadyFinalizedError, FinalizeReferenceMissingError
-from .lifecycle import (
-    FAMILY_FINALIZE_ACCEPTED,
-    LifecycleEvent,
-    LifecyclePublisher,
-)
 
 logger = logging.getLogger(__name__)
 
 OPERATION_FINALIZE = "finalize"
+
+# The lifecycle family Core emits on its own stream when it accepts a finalize
+# (Q24: Relay is ingress-only; Core owns the lifecycle event). Echoed back on
+# the FinalizeResponse so the client/Scout can correlate, but Relay no longer
+# publishes it.
+FAMILY_FINALIZE_ACCEPTED = "relay.finalize.accepted"
 
 
 @dataclass
@@ -85,17 +88,15 @@ class FinalizeService:
     Reference-only finalize (#3) handler.
 
     Usage:
-        svc = FinalizeService(core_client, lifecycle_publisher)
+        svc = FinalizeService(core_client)
         result = await svc.finalize(ref="sha256:...", trace_id="018f...")
     """
 
     def __init__(
         self,
         core_client: Any,
-        lifecycle_publisher: LifecyclePublisher,
     ):
         self._core = core_client
-        self._lifecycle = lifecycle_publisher
         # (operation, ref|trace_id) -> {"result": FinalizeResult, "finalized": True}
         self._records: Dict[str, Dict[str, Any]] = {}
 
@@ -143,8 +144,8 @@ class FinalizeService:
 
         # ── Forward the finalize trigger to Core (HTTP, discretionary (c)). ──
         # Best-effort: Core being down must not strand the finalize — the doc
-        # is already ingested; Core reconciles. We still record + emit so the
-        # client's trace_id is dedup-anchored and the SSE seam fires.
+        # is already ingested; Core reconciles. We still record the result so the
+        # client's trace_id is dedup-anchored; Core emits the lifecycle event.
         core_resp: Dict[str, Any] = {}
         try:
             core_resp = await self._core.finalize_by_reference(
@@ -162,19 +163,10 @@ class FinalizeService:
                 exc,
             )
 
-        # ── Emit relay.finalize.accepted via the lifecycle seam. ─────────────
-        event = LifecycleEvent(
-            family=FAMILY_FINALIZE_ACCEPTED,
-            trace_id=trace_id,
-            data={
-                "doc_ref": doc_ref,
-                "ref": ref,
-                "finalize_by_reference": True,
-                "actor_user_id": actor_user_id,
-            },
-        )
-        await self._lifecycle.publish(event)
-        frame = event.to_frame()
+        # Relay is ingress-only (Q24): Core emits the finalize.accepted lifecycle
+        # event on its own stream. Relay just records + responds. The event_id
+        # rides Core's ack when present, else a local correlation id; the
+        # event_family is the family Core will emit, echoed for the client.
         event_id = str(core_resp.get("event_id") or f"relay-evt-{uuid7()}")
 
         result = FinalizeResult(
@@ -183,7 +175,7 @@ class FinalizeService:
             trace_id=trace_id,
             doc_ref=doc_ref,
             event_id=event_id,
-            event_family=str(frame.get("family") or FAMILY_FINALIZE_ACCEPTED),
+            event_family=str(core_resp.get("event_family") or FAMILY_FINALIZE_ACCEPTED),
             core=core_resp,
         )
 

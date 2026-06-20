@@ -2,18 +2,23 @@
 Unit tests for FinalizeService — the #3 reference-only fiscalize (R-M2).
 
 Direct service tests (no HTTP): idempotency keying, 409-on-duplicate via
-AlreadyFinalizedError, the relay.finalize.accepted lifecycle emit through a
-mock Core sink, and the missing-reference 400. Asserts the Core finalize
+AlreadyFinalizedError, and the missing-reference 400. Asserts the Core finalize
 trigger is forwarded with the trace_id (the cross-seat NEEDS-CORE forward).
+
+Q24 (ARCH tick56): Relay is ingress-only — Core emits the finalize.accepted
+lifecycle event on its own stream. Relay no longer publishes lifecycle events,
+so there is no publisher seam to assert here; the event_family is still echoed
+on the result for client correlation.
 """
 
 import pytest
 
 from src.errors import AlreadyFinalizedError, FinalizeReferenceMissingError
-from src.services.finalize import FinalizeService, _finalize_key, OPERATION_FINALIZE
-from src.services.lifecycle import (
+from src.services.finalize import (
     FAMILY_FINALIZE_ACCEPTED,
-    RecordingLifecyclePublisher,
+    FinalizeService,
+    _finalize_key,
+    OPERATION_FINALIZE,
 )
 
 
@@ -36,13 +41,8 @@ def core():
 
 
 @pytest.fixture
-def publisher():
-    return RecordingLifecyclePublisher()
-
-
-@pytest.fixture
-def service(core, publisher):
-    return FinalizeService(core, publisher)
+def service(core):
+    return FinalizeService(core)
 
 
 # ── Key derivation ───────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ def test_finalize_key_empty_when_both_blank():
 
 
 @pytest.mark.asyncio
-async def test_finalize_accepts_and_emits_event(service, core, publisher):
+async def test_finalize_accepts_and_forwards_to_core(service, core):
     result = await service.finalize(ref="sha256:abc", trace_id="trace-1")
     assert result.status == "accepted"
     assert result.finalize_by_reference is True
@@ -75,15 +75,9 @@ async def test_finalize_accepts_and_emits_event(service, core, publisher):
     assert result.idempotent_replay is False
 
     # Core finalize trigger forwarded WITH the trace_id (NEEDS-CORE forward).
+    # Q24: the finalize.accepted lifecycle event is Core's to emit, not Relay's.
     assert len(core.finalize_calls) == 1
     assert core.finalize_calls[0]["trace_id"] == "trace-1"
-
-    # relay.finalize.accepted emitted via the seam, trace_id echoed.
-    assert len(publisher.events) == 1
-    evt = publisher.last()
-    assert evt.family == FAMILY_FINALIZE_ACCEPTED
-    assert evt.trace_id == "trace-1"
-    assert publisher.frames[-1]["trace_id"] == "trace-1"
 
 
 @pytest.mark.asyncio
@@ -93,26 +87,24 @@ async def test_doc_ref_defaults_to_ref(service):
 
 
 @pytest.mark.asyncio
-async def test_explicit_doc_ref_preserved(service, publisher):
+async def test_explicit_doc_ref_preserved(service):
     result = await service.finalize(ref="sha256:xyz", trace_id="t3", doc_ref="DOC-9")
     assert result.doc_ref == "DOC-9"
-    assert publisher.frames[-1]["data"]["doc_ref"] == "DOC-9"
 
 
 # ── Idempotency / 409 ────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_duplicate_trace_id_raises_409(service, core, publisher):
+async def test_duplicate_trace_id_raises_409(service, core):
     await service.finalize(ref="sha256:a", trace_id="dup")
     with pytest.raises(AlreadyFinalizedError) as ei:
         await service.finalize(ref="sha256:a", trace_id="dup")
     assert ei.value.status_code == 409
     assert ei.value.error_code == "ALREADY_FINALIZED"
     assert ei.value.trace_id == "dup"
-    # No second Core trigger, no second event.
+    # No second Core trigger (the duplicate is short-circuited before forward).
     assert len(core.finalize_calls) == 1
-    assert len(publisher.events) == 1
 
 
 @pytest.mark.asyncio
@@ -133,22 +125,23 @@ async def test_same_trace_dedups_across_changed_ref(service):
 
 
 @pytest.mark.asyncio
-async def test_distinct_trace_ids_both_accepted(service, publisher):
+async def test_distinct_trace_ids_both_accepted(service, core):
     r1 = await service.finalize(ref="sha256:p", trace_id="trace-A")
     r2 = await service.finalize(ref="sha256:q", trace_id="trace-B")
     assert r1.status == "accepted" and r2.status == "accepted"
-    assert len(publisher.events) == 2
+    assert len(core.finalize_calls) == 2
 
 
 # ── Validation ───────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_missing_reference_raises_400(service, publisher):
+async def test_missing_reference_raises_400(service, core):
     with pytest.raises(FinalizeReferenceMissingError) as ei:
         await service.finalize(ref="", trace_id="")
     assert ei.value.status_code == 400
-    assert publisher.events == []
+    # Rejected before any Core forward.
+    assert core.finalize_calls == []
 
 
 # ── Resilience: Core down must not strand the finalize ───────────────────
@@ -160,10 +153,9 @@ class _BrokenCore:
 
 
 @pytest.mark.asyncio
-async def test_core_failure_is_non_fatal(publisher):
-    svc = FinalizeService(_BrokenCore(), publisher)
+async def test_core_failure_is_non_fatal():
+    svc = FinalizeService(_BrokenCore())
     result = await svc.finalize(ref="sha256:resilient", trace_id="t-res")
-    # Still accepted + still emits the lifecycle event (doc already ingested).
+    # Still accepted even though the Core forward raised (doc already ingested).
     assert result.status == "accepted"
-    assert len(publisher.events) == 1
-    assert publisher.last().trace_id == "t-res"
+    assert result.trace_id == "t-res"

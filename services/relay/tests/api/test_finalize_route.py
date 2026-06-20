@@ -3,11 +3,14 @@ Tests for POST /api/finalize — the #3 reference-only fiscalize call (R-M2).
 
 Covers (§B-Submit / SCOUT contract §3.3):
     - reference-only shape: NO bytes; ref/trace_id in the JSON body
-    - trace_id echo on the response (and on the relay.finalize.accepted event)
+    - trace_id echo on the response
     - 409 ALREADY_FINALIZED on a duplicate trace_id (client treats as success)
-    - the lifecycle event relay.finalize.accepted is emitted via the publisher
-      seam (mock the Core sink) with the trace_id echoed
     - finalize=false vs finalize=true routing on /api/ingest (the contract axis)
+
+Q24 (ARCH tick56): Relay is ingress-only — Core emits the finalize.accepted
+lifecycle event on its own stream. Relay no longer publishes lifecycle events,
+so there is no publisher seam to swap or assert; we assert the route's HTTP
+behaviour (status/shape/echo/dedup) only.
 
 Auth: HMAC over the exact JSON body bytes (the #3 call has no multipart, so the
 signature is computable — unlike the ingest-route tests which intentionally
@@ -25,11 +28,7 @@ from httpx import AsyncClient, ASGITransport
 from src.api.app import create_app
 from src.config import RelayConfig
 from src.core.auth import compute_signature
-from src.services.lifecycle import (
-    FAMILY_FINALIZE_ACCEPTED,
-    RecordingLifecyclePublisher,
-)
-from src.services.finalize import FinalizeService
+from src.services.finalize import FAMILY_FINALIZE_ACCEPTED
 
 
 TEST_API_KEY = "test-key-001"
@@ -59,22 +58,15 @@ def test_secrets():
 
 
 @pytest.fixture
-async def client_and_publisher(test_config, test_secrets):
-    """App with the lifecycle publisher swapped for an in-memory recorder so we
-    can assert relay.finalize.accepted was emitted with the trace_id echo.
-
-    The seam is the whole point: we replace app.state.lifecycle_publisher and
-    rebuild the finalize_service around it AFTER lifespan startup, exercising
-    the swappability the contract requires (Q15 topology unresolved).
-    """
+async def client(test_config, test_secrets):
+    """App wired by the real factory (Q24: ingress-only — no lifecycle publisher
+    to swap; Core owns the finalize.accepted event). We assert the route's HTTP
+    behaviour only."""
     app = create_app(config=test_config, api_key_secrets=test_secrets)
     async with LifespanManager(app):
-        recorder = RecordingLifecyclePublisher()
-        app.state.lifecycle_publisher = recorder
-        app.state.finalize_service = FinalizeService(app.state.core, recorder)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            yield c, recorder
+            yield c
 
 
 def _hmac_headers_for_body(body: bytes) -> dict:
@@ -103,8 +95,7 @@ def _post_finalize_args(payload: dict) -> tuple[bytes, dict]:
 
 class TestFinalizeReferenceOnly:
     @pytest.mark.asyncio
-    async def test_finalize_by_ref_no_bytes_returns_202(self, client_and_publisher):
-        client, _ = client_and_publisher
+    async def test_finalize_by_ref_no_bytes_returns_202(self, client):
         body, headers = _post_finalize_args(
             {"ref": "sha256:abc123", "trace_id": "018f-trace-aaa"}
         )
@@ -121,46 +112,35 @@ class TestFinalizeReferenceOnly:
         assert data["idempotent_replay"] is False
 
     @pytest.mark.asyncio
-    async def test_trace_id_echoed_on_lifecycle_event(self, client_and_publisher):
-        client, recorder = client_and_publisher
+    async def test_trace_id_echoed_on_response(self, client):
+        """The client trace_id is echoed back on the finalize response (Core
+        echoes it onward on its own lifecycle stream — Q24)."""
         body, headers = _post_finalize_args(
             {"ref": "sha256:doc-xyz", "trace_id": "018f-echo-me"}
         )
         resp = await client.post("/api/finalize", content=body, headers=headers)
         assert resp.status_code == 202
-
-        # relay.finalize.accepted emitted via the seam, trace_id echoed both in
-        # the event and lifted to top-level on the frame (events.py:530-532).
-        assert len(recorder.events) == 1
-        evt = recorder.last()
-        assert evt.family == FAMILY_FINALIZE_ACCEPTED
-        assert evt.trace_id == "018f-echo-me"
-        frame = recorder.frames[-1]
-        assert frame["trace_id"] == "018f-echo-me"
-        assert frame["data"]["trace_id"] == "018f-echo-me"
-        assert frame["data"]["raw_bytes_in_event"] is False
-        assert frame["data"]["finalize_by_reference"] is True
+        data = resp.json()
+        assert data["trace_id"] == "018f-echo-me"
+        assert data["event_family"] == FAMILY_FINALIZE_ACCEPTED
+        assert data["raw_bytes_sent"] is False
+        assert data["finalize_by_reference"] is True
 
     @pytest.mark.asyncio
-    async def test_finalize_with_only_trace_id(self, client_and_publisher):
+    async def test_finalize_with_only_trace_id(self, client):
         """ref may be empty if a trace_id is supplied (it is a valid ref)."""
-        client, recorder = client_and_publisher
         body, headers = _post_finalize_args({"trace_id": "018f-only-trace"})
         resp = await client.post("/api/finalize", content=body, headers=headers)
         assert resp.status_code == 202
         assert resp.json()["trace_id"] == "018f-only-trace"
-        assert recorder.last().trace_id == "018f-only-trace"
 
     @pytest.mark.asyncio
-    async def test_finalize_missing_reference_400(self, client_and_publisher):
+    async def test_finalize_missing_reference_400(self, client):
         """Neither ref nor trace_id → 400 (never a silent no-op)."""
-        client, recorder = client_and_publisher
         body, headers = _post_finalize_args({})
         resp = await client.post("/api/finalize", content=body, headers=headers)
         assert resp.status_code == 400
         assert resp.json()["error_code"] == "VALIDATION_FAILED"
-        # No lifecycle event for a rejected finalize.
-        assert recorder.events == []
 
 
 # ── 409 on duplicate / already-finalized trace_id ────────────────────────
@@ -168,8 +148,7 @@ class TestFinalizeReferenceOnly:
 
 class TestFinalizeDuplicate409:
     @pytest.mark.asyncio
-    async def test_duplicate_trace_id_returns_409(self, client_and_publisher):
-        client, recorder = client_and_publisher
+    async def test_duplicate_trace_id_returns_409(self, client):
         payload = {"ref": "sha256:dup", "trace_id": "018f-dup-trace"}
 
         body1, headers1 = _post_finalize_args(payload)
@@ -183,13 +162,9 @@ class TestFinalizeDuplicate409:
         err = second.json()
         assert err["error_code"] == "ALREADY_FINALIZED"
 
-        # Only ONE lifecycle event — the duplicate did not re-emit / re-trigger.
-        assert len(recorder.events) == 1
-
     @pytest.mark.asyncio
-    async def test_duplicate_by_ref_when_no_trace(self, client_and_publisher):
+    async def test_duplicate_by_ref_when_no_trace(self, client):
         """Dedup also works when only a ref is supplied (no trace_id)."""
-        client, recorder = client_and_publisher
         payload = {"ref": "sha256:ref-only-dup"}
 
         b1, h1 = _post_finalize_args(payload)
@@ -197,7 +172,6 @@ class TestFinalizeDuplicate409:
         b2, h2 = _post_finalize_args(payload)
         second = await client.post("/api/finalize", content=b2, headers=h2)
         assert second.status_code == 409
-        assert len(recorder.events) == 1
 
 
 # ── Auth on the finalize route ───────────────────────────────────────────
@@ -205,8 +179,7 @@ class TestFinalizeDuplicate409:
 
 class TestFinalizeAuth:
     @pytest.mark.asyncio
-    async def test_no_credentials_401(self, client_and_publisher):
-        client, _ = client_and_publisher
+    async def test_no_credentials_401(self, client):
         body = json.dumps({"ref": "x", "trace_id": "t"}).encode("utf-8")
         resp = await client.post(
             "/api/finalize", content=body, headers={"Content-Type": "application/json"}
@@ -215,8 +188,7 @@ class TestFinalizeAuth:
         assert resp.json()["error_code"] == "AUTHENTICATION_FAILED"
 
     @pytest.mark.asyncio
-    async def test_bad_signature_401(self, client_and_publisher):
-        client, _ = client_and_publisher
+    async def test_bad_signature_401(self, client):
         body = json.dumps({"ref": "x", "trace_id": "t"}).encode("utf-8")
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         headers = {
@@ -229,8 +201,7 @@ class TestFinalizeAuth:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_trace_id_header_echoed_in_response_headers(self, client_and_publisher):
-        client, _ = client_and_publisher
+    async def test_trace_id_header_echoed_in_response_headers(self, client):
         body, headers = _post_finalize_args({"ref": "r", "trace_id": "018f-hdr"})
         headers["X-Trace-ID"] = "request-trace-zzz"
         resp = await client.post("/api/finalize", content=body, headers=headers)

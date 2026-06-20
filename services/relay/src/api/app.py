@@ -40,7 +40,6 @@ from ..services.bulk import BulkService
 from ..services.external import ExternalService
 from ..services.finalize import FinalizeService
 from ..services.ingestion import IngestionService
-from ..services.lifecycle import CoreLifecyclePublisher
 from ..services.status_service import StatusService
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
 from .routes.artifacts import router as artifacts_router
@@ -165,22 +164,14 @@ def create_app(
         else:
             logger.warning("Module cache NOT loaded — external flow will return 503")
 
-        # Lifecycle publisher seam (§B-EventLog) — default sink forwards
-        # relay.*/core.* events to Core over HTTP (discretionary ARCH ruling
-        # (c); AMQP-first deferred to S3). Swappable via
-        # app.state.lifecycle_publisher. Built before the services so both
-        # BulkService (core.preview.available, Q4) and FinalizeService
-        # (relay.finalize.accepted) share the one instance.
-        lifecycle_publisher = CoreLifecyclePublisher(core)
-
         # Service layer
         ingestion = IngestionService(config, heartbeat, core, redis_client=redis_client)
         irn_gen = IRNGenerator(module_cache)
         qr_gen = QRGenerator(module_cache)
-        bulk_service = BulkService(ingestion, core, lifecycle_publisher)
+        bulk_service = BulkService(ingestion, core)
         external_service = ExternalService(ingestion, core, irn_gen, qr_gen)
         batch_external_service = BatchExternalService(ingestion, core, irn_gen, qr_gen)
-        finalize_service = FinalizeService(core, lifecycle_publisher)
+        finalize_service = FinalizeService(core)
         status_service = StatusService(heartbeat, core)
 
         # AMQP consumer (Q37 Gap #6) — optional, non-fatal.
@@ -206,7 +197,6 @@ def create_app(
         app.state.bulk_service = bulk_service
         app.state.external_service = external_service
         app.state.batch_external_service = batch_external_service
-        app.state.lifecycle_publisher = lifecycle_publisher
         app.state.finalize_service = finalize_service
         app.state.status_service = status_service
         app.state.amqp_consumer = amqp_consumer
