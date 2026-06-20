@@ -36,7 +36,7 @@ import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Literal, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -163,13 +163,45 @@ class IngestLedger:
     access to the one connection object (``check_same_thread=False``).
     """
 
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        retention_days: int = 7,
+        max_rows: int = 500_000,
+        prune_every_n: int = 100,
+        prune_on_start: bool = True,
+    ):
+        """
+        Args:
+            db_path: SQLite file path (``:memory:`` for tests).
+            retention_days: AGE predicate — terminal rows older than this are
+                pruned. Bob's ruling: SHORTER than 30 days (default ~7d). Values
+                >=30 are clamped to 29 (defence-in-depth; config also clamps).
+            max_rows: SIZE/row cap — when the table exceeds this, the oldest
+                terminal rows are pruned down to the cap.
+            prune_every_n: write-trigger gate. The opportunistic prune runs only
+                on every Nth ``record_received`` insert (cheap in-memory counter),
+                NOT on a timer. Set <=1 to prune on every insert.
+            prune_on_start: run a single one-shot prune at construction (the
+                "event" is startup). Steady-state pruning is the write path.
+        """
         if not db_path:
             # Guarded construction is the caller's job (ledger disabled when
             # RELAY_DB_PATH is unset). Constructing with an empty path is a bug.
             raise ValueError("IngestLedger requires a non-empty db_path")
         self._db_path = db_path
         self._lock = threading.Lock()
+        # ── Retention / prune knobs (Q28 ratify rider — Bob 2026-06-20) ──
+        # Defence-in-depth clamp: retention window MUST be < 30 days regardless
+        # of how this is constructed (config also clamps on the way in).
+        self._retention_days = max(1, min(int(retention_days), 29))
+        self._max_rows = max(1, int(max_rows))
+        self._prune_every_n = max(1, int(prune_every_n))
+        # In-memory write counter — the WRITE-TRIGGER gate (no timer/poller).
+        # Reset to 0 each time the gate fires. Guarded by the same lock as the
+        # connection (incremented inside record_received's locked section).
+        self._writes_since_prune = 0
         self._conn = sqlite3.connect(
             db_path,
             check_same_thread=False,
@@ -178,7 +210,26 @@ class IngestLedger:
         self._conn.row_factory = sqlite3.Row
         self._configure_pragmas()
         self._create_schema()
-        logger.info("ingest_ledger ready — %s", db_path)
+        logger.info(
+            "ingest_ledger ready — %s (retention=%dd, max_rows=%d, prune_every_n=%d)",
+            db_path,
+            self._retention_days,
+            self._max_rows,
+            self._prune_every_n,
+        )
+        # One-shot startup prune (event = startup). Best-effort: a prune failure
+        # must never block the ledger from coming up.
+        if prune_on_start:
+            try:
+                pruned = self.prune()
+                if pruned:
+                    logger.info(
+                        "ingest_ledger: startup prune removed %d stale row(s) — %s",
+                        pruned,
+                        db_path,
+                    )
+            except sqlite3.Error as e:  # pragma: no cover - defensive
+                logger.warning("ingest_ledger: startup prune failed: %s", e)
 
     # ── Setup ──────────────────────────────────────────────────────────────
 
@@ -226,6 +277,7 @@ class IngestLedger:
         Crash-consistent: a single autocommitted INSERT.
         """
         now = received_at or _utc_now_iso()
+        fire_prune = False
         with self._lock:
             try:
                 self._conn.execute(
@@ -248,6 +300,30 @@ class IngestLedger:
                     file_sha256[:12],
                 )
                 return "duplicate", prior
+            # ── WRITE-TRIGGER gate (Q28 ratify rider — NO timer/poller) ──
+            # A new row landed. Advance the in-memory counter; when it reaches
+            # the gate, fire the opportunistic prune (piggybacked on THIS ingest
+            # write, never on a clock). Cheap O(1) check on the common path.
+            self._writes_since_prune += 1
+            if self._writes_since_prune >= self._prune_every_n:
+                self._writes_since_prune = 0
+                fire_prune = True
+        # Run the prune OUTSIDE the insert's lock section (prune() re-acquires
+        # the lock itself — avoids re-entrant deadlock). Still event-triggered:
+        # it only runs because this insert tripped the gate.
+        if fire_prune:
+            try:
+                pruned = self.prune()
+                if pruned:
+                    logger.info(
+                        "ingest_ledger: write-triggered prune removed %d "
+                        "stale row(s) (gate=%d writes)",
+                        pruned,
+                        self._prune_every_n,
+                    )
+            except sqlite3.Error as e:  # pragma: no cover - defensive
+                # A prune failure must never fail the ingest write that triggered it.
+                logger.warning("ingest_ledger: write-triggered prune failed: %s", e)
         return "new", None
 
     def mark_processed(
@@ -311,6 +387,92 @@ class IngestLedger:
                 """,
                 (now, short, tenant_id, file_sha256),
             )
+
+    # ── Retention / prune (Q28 ratify rider — Bob 2026-06-20) ───────────────
+
+    def prune(
+        self,
+        retention_days: Optional[int] = None,
+        max_rows: Optional[int] = None,
+    ) -> int:
+        """
+        Opportunistic retention prune of the ingest_ledger. Returns rows deleted.
+
+        Bob's ruling (verbatim): "window SHORTER than 30 days (default ~7d) AND
+        a hard size/row cap, whichever triggers first; prune oldest
+        processed/duplicate first, never pending/error." Safe because HB's
+        ``blob_deduplication`` is the authoritative dedup store — this ledger is
+        a transient idempotency/crash-survival cache, not the system of record.
+
+        Two predicates, evaluated together each prune ("whichever triggers
+        first" = run both):
+
+          • AGE — terminal rows with ``received_at`` older than
+            ``now - retention_days``.
+          • SIZE — when the table exceeds ``max_rows``, the oldest terminal rows
+            beyond the cap (delete ``total_rows - max_rows`` oldest terminal
+            rows). Note the cap is measured against the WHOLE table (incl.
+            pending/error), but only terminal rows are ever deleted to satisfy
+            it — so a table full of in-flight rows is left intact (correctness
+            over the size bound).
+
+        ONLY ``result IN ('processed','duplicate')`` is ever deleted. Rows that
+        are ``pending`` (in-flight / possible mid-pipeline crash) or ``error``
+        (need attention) are NEVER pruned, even if old or over-cap.
+
+        Oldest-first: ordered by ``received_at ASC`` so the eviction is FIFO.
+
+        Crash-safe: a single ``DELETE`` statement (autocommit = its own txn),
+        respecting the WAL / busy_timeout already configured. Either the whole
+        prune lands or none of it does.
+        """
+        days = self._retention_days if retention_days is None else int(retention_days)
+        cap = self._max_rows if max_rows is None else int(max_rows)
+        # Defence-in-depth clamps (same invariants as the constructor/config).
+        days = max(1, min(days, 29))
+        cap = max(1, cap)
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        with self._lock:
+            # SIZE predicate: how many oldest terminal rows to evict to bring the
+            # WHOLE table down to the cap. Cheap COUNT(*) on the gated path.
+            total = self._conn.execute(
+                "SELECT COUNT(*) FROM ingest_ledger"
+            ).fetchone()[0]
+            over_cap = max(0, total - cap)
+
+            # One crash-safe DELETE. The row's rowid is in the eviction set if
+            # it is a terminal ('processed'/'duplicate') row AND either:
+            #   (a) it is older than the retention cutoff (AGE), OR
+            #   (b) it is among the `over_cap` OLDEST terminal rows (SIZE).
+            # pending/error rows are excluded by the result filter in BOTH
+            # subqueries, so they can never be deleted.
+            cur = self._conn.execute(
+                """
+                DELETE FROM ingest_ledger
+                 WHERE rowid IN (
+                     -- (a) AGE: terminal rows older than the retention cutoff
+                     SELECT rowid FROM ingest_ledger
+                      WHERE result IN ('processed', 'duplicate')
+                        AND received_at < ?
+                     UNION
+                     -- (b) SIZE: the oldest terminal rows beyond the cap.
+                     -- Wrapped in a subselect so ORDER BY/LIMIT scope to THIS
+                     -- arm (SQLite rejects ORDER BY/LIMIT on a bare UNION arm).
+                     SELECT rowid FROM (
+                         SELECT rowid FROM ingest_ledger
+                          WHERE result IN ('processed', 'duplicate')
+                          ORDER BY received_at ASC, rowid ASC
+                          LIMIT ?
+                     )
+                 )
+                """,
+                (cutoff, over_cap),
+            )
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
     # ── Reads ──────────────────────────────────────────────────────────────
 

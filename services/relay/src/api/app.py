@@ -173,8 +173,22 @@ def create_app(
         ingest_ledger: Optional[IngestLedger] = None
         if config.relay_db_path:
             try:
-                ingest_ledger = IngestLedger(config.relay_db_path)
-                logger.info(f"Ingest ledger enabled — {config.relay_db_path}")
+                # Retention/prune knobs (Q28 ratify rider — Bob 2026-06-20).
+                # The prune is WRITE-TRIGGERED inside the ledger (no timer):
+                # piggybacked on every Nth record_received, plus a one-shot
+                # prune on startup. retention_days is clamped < 30 in config.
+                ingest_ledger = IngestLedger(
+                    config.relay_db_path,
+                    retention_days=config.relay_db_retention_days,
+                    max_rows=config.relay_db_max_rows,
+                    prune_every_n=config.relay_db_prune_every_n,
+                )
+                logger.info(
+                    f"Ingest ledger enabled — {config.relay_db_path} "
+                    f"(retention={config.relay_db_retention_days}d, "
+                    f"max_rows={config.relay_db_max_rows}, "
+                    f"prune_every_n={config.relay_db_prune_every_n})"
+                )
             except Exception as e:
                 # A bad path must not take down the Frontdoor. Degrade to
                 # ledger-disabled (the synchronous path is still correct) and

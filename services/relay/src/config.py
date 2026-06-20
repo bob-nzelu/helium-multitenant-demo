@@ -101,6 +101,21 @@ class RelayConfig:
     # §2.3 lock). Rollback = delete the file or unset this var.
     relay_db_path: str = ""                 # RELAY_DB_PATH
 
+    # ── relay.db retention / prune (Q28 ratify rider — Bob, 2026-06-20) ──
+    # Opportunistic, WRITE-TRIGGERED prune of the ingest_ledger (NO timer /
+    # poller — Bob's hard rule). Bounds relay.db growth: it is a transient
+    # idempotency/crash-survival ledger, NOT the system of record — HB's
+    # blob_deduplication is the authoritative dedup store, so pruning old
+    # terminal rows here is safe. Two predicates, "whichever triggers first":
+    #   • AGE: rows older than retention_days, AND
+    #   • SIZE: oldest rows beyond max_rows,
+    # each prune applies BOTH. Only ever deletes terminal result IN
+    # ('processed','duplicate'); NEVER 'pending'/'error' (in-flight / need
+    # attention). Bob's window: SHORTER than 30 days, default ~7d.
+    relay_db_retention_days: int = 7        # RELAY_DB_RETENTION_DAYS — MUST be < 30 (clamped)
+    relay_db_max_rows: int = 500_000        # RELAY_DB_MAX_ROWS — hard size/row cap
+    relay_db_prune_every_n: int = 100       # RELAY_DB_PRUNE_EVERY_N — write-trigger gate (every Nth insert)
+
     # ── Malware scanning ──────────────────────────────────────────────────
     malware_scan_enabled: bool = False
     malware_clamd_socket: str = ""
@@ -245,6 +260,24 @@ class RelayConfig:
         # ── relay.db ingest ledger
         if v := env("DB_PATH"):
             kwargs["relay_db_path"] = v
+
+        # ── relay.db retention / prune (Q28 ratify rider)
+        # retention_days MUST be < 30 (Bob's window: shorter than 30, default
+        # ~7d). Clamp any operator value into [1, 29] so a misconfig can never
+        # turn this into a >=30-day store.
+        if v := env("DB_RETENTION_DAYS"):
+            days = int(v)
+            if days < 1:
+                days = 1
+            elif days >= 30:
+                days = 29
+            kwargs["relay_db_retention_days"] = days
+        if v := env("DB_MAX_ROWS"):
+            rows = int(v)
+            kwargs["relay_db_max_rows"] = max(rows, 1)
+        if v := env("DB_PRUNE_EVERY_N"):
+            n = int(v)
+            kwargs["relay_db_prune_every_n"] = max(n, 1)
 
         # ── Malware scanning
         if v := env("MALWARE_SCAN_ENABLED"):
