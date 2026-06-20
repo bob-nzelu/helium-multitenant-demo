@@ -205,6 +205,32 @@ class TestPerFileProcessing:
         assert len(reg_calls) == 2
 
     @pytest.mark.asyncio
+    async def test_transaction_id_passed_through_to_register(
+        self, service, heartbeat, single_pdf
+    ):
+        """L30 §5: an external transaction_id in metadata is surfaced to HB's
+        register call as transaction_ids=[txn] so HB seeds file_transactions."""
+        await service.ingest(
+            single_pdf,
+            api_key="test-key",
+            trace_id="t-txn",
+            metadata={"transaction_id": "TXN-SEED-001"},
+        )
+        reg_calls = [c for c in heartbeat._calls if c[0] == "register_blob"]
+        assert len(reg_calls) == 1
+        # stub records ("register_blob", blob_uuid, transaction_ids)
+        assert reg_calls[0][2] == ["TXN-SEED-001"]
+
+    @pytest.mark.asyncio
+    async def test_no_transaction_id_seeds_none(
+        self, service, heartbeat, single_pdf
+    ):
+        """Internal uploads carry no transaction_id → register gets None."""
+        await service.ingest(single_pdf, api_key="test-key", trace_id="t-none")
+        reg_calls = [c for c in heartbeat._calls if c[0] == "register_blob"]
+        assert reg_calls[0][2] is None
+
+    @pytest.mark.asyncio
     async def test_backward_compat_file_hash_property(self, service, single_pdf):
         """file_hash property returns first hash for backward compat."""
         result = await service.ingest(single_pdf, api_key="test-key", trace_id="t-pf7")
@@ -511,7 +537,8 @@ class TestIngestionBestEffort:
 
         class FailRegisterHeartBeat(StubHeartBeatClient):
             async def register_blob(self, blob_uuid, filename, file_size_bytes,
-                                    file_hash, api_key, metadata=None, jwt_token=None):
+                                    file_hash, api_key, metadata=None, jwt_token=None,
+                                    transaction_ids=None):
                 raise ConnectionError("Registration endpoint down")
 
         svc = IngestionService(config, FailRegisterHeartBeat(), core)

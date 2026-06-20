@@ -91,6 +91,38 @@ X-Signature:  HMAC-SHA256(secret, "{api_key}:{timestamp}:{sha256(body)}")
 
 Timestamp must be within 5 minutes of server time.
 
+## ⚠️ MOCK_AUTH=false cutover — operator runbook (Relay→HB s2s key)
+
+> **The trap:** while HeartBeat runs `HEARTBEAT_MOCK_AUTH=true`, HB does **not**
+> verify the inbound s2s HMAC, so a missing or wrong `RELAY_S2S_SIGNING_KEY` is
+> **masked** — Relay looks perfectly healthy. The instant HB flips to real auth
+> (`MOCK_AUTH=false`, the Q35 gate), HB enforces `verify_service_credentials`
+> and **every Relay→HB call hard-fails** (401 `AUTHENTICATION_FAILED`): user-JWT
+> introspect, `POST /api/blobs/write`, `/api/blobs/register`, config fetch,
+> audit log, and the daily-limit check. This is the same landmine Core hit with
+> `CORE_HEARTBEAT_S2S_SIGNING_KEY`; **both services must be cut over together.**
+
+At the auth cutover, in order:
+
+1. **HB generates the per-service key.** On HB startup with real auth, HB mints a
+   64-hex s2s signing key per service and logs it once at `WARNING`
+   (`s2s_signing_key_generated service=relay …`). HB owns producing this value.
+2. **Operator pastes it into Relay's env:** `RELAY_S2S_SIGNING_KEY=<value>`
+   (verbatim — 64 lowercase-hex, no prefix/whitespace; Relay's startup check
+   `validate_signing_key_shape` fails the container fast on a malformed value).
+   Do the same for Core's `CORE_HEARTBEAT_S2S_SIGNING_KEY` in the same window.
+3. **Restart Relay** so the key loads (`RELAY_S2S_SIGNING_KEY` → config
+   `heartbeat_s2s_signing_key`). Relay's lifespan also runs an NTP skew check vs
+   HB `/health`; keep clock skew < HB's 300 s `HMAC_TIMESTAMP_SKEW` window
+   (chrony/ntpd on the container) or signed calls 401 even with the right key.
+4. **Verify:** one authenticated Relay→HB round-trip succeeds (e.g. a health/ingest
+   smoke that touches introspect or blob-register) before declaring cutover done.
+
+Not blocking pre-cutover (EC2 still runs the consistent `MOCK_AUTH=true` stack),
+but it is a **required, sequenced step in the go-live runbook** — HB owns key
+generation; the operator owns the paste + restart for both Relay and Core.
+Refs: `HMAC_S2S_MIGRATION_SPEC.md` §1.3/§5 (helium-services), env var table above.
+
 ## Endpoints
 
 ### POST /api/ingest

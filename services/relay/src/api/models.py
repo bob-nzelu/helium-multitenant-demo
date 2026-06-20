@@ -4,9 +4,143 @@ API Pydantic Models
 Request/response schemas for Relay-API endpoints.
 """
 
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+# ── Q37 External Batch Ingest (PRONALYTICS_MIDDLEWARE_API §3) ─────────────────
+
+
+class BatchProcessedEntry(BaseModel):
+    """One successfully fiscalized invoice in a batch ingest response.
+
+    L31 (monetary precision): money is ``Decimal``, never ``float`` — it
+    serializes to a JSON string (e.g. ``"7.50"``) so no float imprecision is
+    reintroduced on the wire.
+
+    VAT (Bob ratification 2026-06-19): production Relay does NO VAT math. A
+    caller-supplied ``vat_amount`` is echoed verbatim; absent → ``null`` (VAT is
+    computed by Core/Transforma downstream, surfaced via the status/invoice).
+    """
+
+    transaction_id: str = Field(description="ERP's unique reference, echoed")
+    irn: str = Field(description="Invoice Reference Number (FIRS-recognised)")
+    qr_code: str = Field(description="QR code for this invoice, Base64-encoded")
+    data_uuid: str = Field(description="Relay internal storage handle")
+    fee_amount: Decimal = Field(description="Echoed invoice amount in NGN (Decimal, JSON string)")
+    vat_amount: Optional[Decimal] = Field(
+        default=None,
+        description="Caller-supplied VAT echoed verbatim (Decimal, JSON string); null if not supplied — Relay does no VAT math",
+    )
+
+
+class BatchDuplicateEntry(BaseModel):
+    """A record already seen in a prior batch — not re-fiscalized."""
+
+    transaction_id: str
+    message: str = "Already received in a previous batch"
+    duplicate_of: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Original IRN, data_uuid, and batch_id of the first submission",
+    )
+
+
+class BatchFailedEntry(BaseModel):
+    """A record that could not be processed."""
+
+    transaction_id: str
+    error: str = Field(description="Human-readable failure reason")
+    error_code: Optional[str] = Field(default=None, description="Machine-readable code")
+
+
+class BatchSummary(BaseModel):
+    total: int
+    processed: int
+    duplicates: int
+    failed: int
+
+
+class BatchIngestResponse(BaseModel):
+    """Response from POST /api/ingest when processing a JSON array of ERP records.
+
+    Replaces the single-document IngestResponse for the external batch flow.
+    status: 'ok' (all processed) | 'partial' (some duplicates/failures) | 'rejected' (none processed).
+    """
+
+    status: str = Field(description="ok | partial | rejected")
+    batch_id: str = Field(description="Echo of the caller-supplied batch_id")
+    trace_id: str = Field(default="", description="Server correlation ID")
+    summary: BatchSummary
+    processed: List[BatchProcessedEntry] = Field(default_factory=list)
+    duplicates: List[BatchDuplicateEntry] = Field(default_factory=list)
+    failed: List[BatchFailedEntry] = Field(default_factory=list)
+
+
+# ── Q37 Status (PRONALYTICS_MIDDLEWARE_API §4) ────────────────────────────────
+
+
+class StatusRequest(BaseModel):
+    """Request body for POST /api/status. Exactly ONE selector must be provided.
+
+    L30 (DATA_MODEL_CANONICAL §6): the external status surface is queryable by
+    ``transaction_id`` / ``batch_id`` / ``invoice_number`` / ``irn``. HeartBeat
+    answers the pre-invoice phase (``transaction_id`` / ``batch_id`` against
+    ``blob.file_transactions``); Core answers the invoice-level phase and is the
+    ONLY resolver of ``invoice_number`` / ``irn`` (HB stays blind to invoice
+    semantics, §8).
+    """
+
+    transaction_id: Optional[str] = Field(default=None, description="ERP transaction reference (HB + Core)")
+    batch_id: Optional[str] = Field(default=None, description="Batch submission identifier (HB + Core)")
+    invoice_number: Optional[str] = Field(default=None, description="Tenant invoice number (Core only)")
+    irn: Optional[str] = Field(default=None, description="Invoice Reference Number (Core only)")
+
+
+class StatusEntry(BaseModel):
+    """One transaction/invoice in a status response (L30 / L29 shape).
+
+    ``result`` is the merged external-surface outcome. It reconciles the
+    "3-way file-status vocab collision" flagged on L29 by mapping the
+    Tier-3 ``file_transactions.status`` (HB) and the Tier-4 invoice state
+    (Core) onto a single ERP-facing vocabulary:
+
+      | result             | source condition                                          |
+      |--------------------|-----------------------------------------------------------|
+      | ``pending``        | HB ``file_transactions.status='pending'`` (seeded, not yet extracted) |
+      | ``processed``      | HB ``acknowledged`` AND a Core invoice exists (IRN minted) |
+      | ``not_an_invoice`` | HB ``file_transactions.status='not_an_invoice'`` (classified out) |
+      | ``duplicate``      | dedup hit at ingest                                       |
+      | ``failed``         | HB file/txn error OR Core ``workflow_status='ERROR'``      |
+
+    ``not_an_invoice`` is ADDITIVE to L29's original 4-value set — surfaced
+    because it is a real terminal an ERP must see (no IRN will ever come).
+    Flagged for ARCH/Bob ratification of the L29 vocab extension.
+    """
+
+    transaction_id: Optional[str] = None
+    irn: Optional[str] = None
+    batch_id: Optional[str] = None
+    invoice_number: Optional[str] = Field(
+        default=None,
+        description="Tenant invoice number from Core invoices DB (null until Core lookup lands)",
+    )
+    result: str = Field(
+        description="Merged outcome: pending | processed | not_an_invoice | duplicate | failed"
+    )
+    firs_status: Optional[str] = Field(
+        default=None,
+        description="Downstream FIRS state from invoices.transmission_status (null pre-transmit)",
+    )
+    received_at: Optional[str] = None
+    processed_at: Optional[str] = None
+
+
+class StatusResponse(BaseModel):
+    """Response from POST /api/status."""
+
+    results: List[StatusEntry] = Field(default_factory=list)
 
 
 # ── Ingest Response ──────────────────────────────────────────────────────

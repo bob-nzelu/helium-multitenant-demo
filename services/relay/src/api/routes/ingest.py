@@ -25,10 +25,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
+from fastapi.responses import JSONResponse
+
 from ..caller_context import CallerContext
 from ..deps import authenticate_request, decrypt_body_if_needed
 from ..models import IngestResponse
 from ..version_drift import version_drift_guard
+from ...services.batch_external import BatchExternalService, auto_batch_id
 from ...services.bulk import BulkService
 from ...services.external import ExternalService
 
@@ -85,6 +88,7 @@ async def ingest(
     call_type: str = Form(default="bulk", description="Flow type: 'bulk' (Float UI) or 'external' (API callers)"),
     metadata: Optional[str] = Form(default=None, description="JSON string with SDK identity/trace fields"),
     invoice_data_json: Optional[str] = Form(default=None, description="JSON string with invoice metadata (external flow only)"),
+    batch_id: Optional[str] = Form(default=None, description="Batch identifier for JSON-array batch ingest (auto-generated if absent)"),
     ctx: CallerContext = Depends(authenticate_request),
 ):
     """
@@ -180,6 +184,54 @@ async def ingest(
     for f in files:
         data = await f.read()
         file_tuples.append((f.filename or "unknown", data))
+
+    # ── Batch JSON-array detection (Q37 Gap #3/#4) ────────────────────────
+    # If exactly one uploaded file has a .json extension AND its content
+    # parses as a JSON list → route to BatchExternalService.
+    # All other cases fall through to the existing single-doc paths below.
+    if len(file_tuples) == 1:
+        fname, fdata = file_tuples[0]
+        if fname.lower().endswith(".json"):
+            try:
+                parsed = json.loads(fdata)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                parsed = None
+
+            if isinstance(parsed, list):
+                resolved_batch_id = batch_id or auto_batch_id()
+                batch_svc: BatchExternalService = request.app.state.batch_external_service
+
+                # Resolve tenant config from registry (keyed by api_key)
+                tenant_registry = getattr(request.app.state, "tenant_registry", {})
+                tenant = tenant_registry.get(ctx.raw_api_key)
+                if tenant is None:
+                    # Build a minimal TenantConfig stub for non-tenant callers
+                    from ...core.tenant import TenantConfig as _TC
+                    tenant = _TC(
+                        tenant_id=ctx.tenant_id or "unknown",
+                        api_key=ctx.raw_api_key or "",
+                        api_secret="",
+                        service_id="UNKNOWN",
+                        name=ctx.tenant_id or "unknown",
+                    )
+
+                logger.info(
+                    f"[{trace_id}] Batch JSON-array detected — "
+                    f"records={len(parsed)}, batch_id={resolved_batch_id}, "
+                    f"tenant={tenant.tenant_id}"
+                )
+
+                batch_result = await batch_svc.process_batch(
+                    records=parsed,
+                    batch_id=resolved_batch_id,
+                    tenant=tenant,
+                    trace_id=trace_id,
+                    jwt_token=jwt_token,
+                )
+                return JSONResponse(
+                    content=batch_result.to_response().model_dump(),
+                    status_code=200,
+                )
 
     if call_type == "external":
         # External flow: ingest → IRN/QR

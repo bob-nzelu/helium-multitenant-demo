@@ -339,7 +339,7 @@ SIMULATOR_CONFIG_DIR=/app/config
 
 ### Bulk XLSX Generation (for /api/burst or pre-generated samples)
 - **Format:** ABMFB-style flat columns: `transaction_id, fee_amount, description, transaction_date, vat_amount, branch`
-- **transaction_id:** Same as invoice_number (ABB-XXXXXXX)
+- **transaction_id:** In the Simulator only, the same value as invoice_number (ABB-XXXXXXX) — a deliberate simplification. **This equivalence is NOT general** (DATA_MODEL_CANONICAL §2, Q40): for a real ERP the `transaction_id` is the ERP's own record reference, supplied at ingest, and `invoice_number` is the tenant's invoice number read from the document at extraction — the two only coincide when the ERP has no separate invoice number. `transaction_id` is never minted by Helium.
 - **50+ rows** per file
 - **Mixed files:** Include 70% valid, 10% duplicates, 10% missing fields, 10% bad values
 

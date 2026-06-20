@@ -392,6 +392,18 @@ class IngestionService:
         if data_uuid:
             enriched_metadata["source_document_id"] = data_uuid
 
+        # L30 §5 (DATA_MODEL_CANONICAL): surface external-supplied transaction_ids
+        # as a first-class field so HB's registration worker seeds one
+        # blob.file_transactions row per id (status='pending'). The external
+        # batch path stamps metadata["transaction_id"] (one record = one file =
+        # one transaction); a future N-per-file path may carry "transaction_ids".
+        # Internal uploads carry neither → None → HB seeds nothing (Core creates
+        # the rows at extraction).
+        transaction_ids = enriched_metadata.get("transaction_ids")
+        if not transaction_ids:
+            single_txn = enriched_metadata.get("transaction_id")
+            transaction_ids = [single_txn] if single_txn else None
+
         try:
             await self._heartbeat.register_blob(
                 blob_uuid=blob_uuid,
@@ -401,6 +413,7 @@ class IngestionService:
                 api_key=api_key,
                 metadata=enriched_metadata,
                 jwt_token=jwt_token,
+                transaction_ids=transaction_ids,
             )
         except Exception as e:
             logger.warning(

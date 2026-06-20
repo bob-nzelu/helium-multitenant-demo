@@ -10,6 +10,8 @@ create_app() builds the complete Relay-API application with:
 
 import logging
 import os
+
+import httpx
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -23,18 +25,23 @@ from ..clients.heartbeat import HeartBeatClient
 from ..clients.introspect import IntrospectClient
 from ..clients.redis_client import RedisClient
 from ..core.irn import IRNGenerator
+from ..core.jwks_cache import JWKSCache
 from ..core.module_cache import TransformaModuleCache
+from ..core.oauth_validator import OAuthTokenValidator
 from ..core.qr import QRGenerator
 from ..errors import RelayError
 from ..observability.startup_checks import (
     check_clock_skew_against_heartbeat,
     validate_signing_key_shape,
 )
+from ..services.amqp_consumer import AMQPConsumer
+from ..services.batch_external import BatchExternalService
 from ..services.bulk import BulkService
 from ..services.external import ExternalService
 from ..services.finalize import FinalizeService
 from ..services.ingestion import IngestionService
 from ..services.lifecycle import CoreLifecyclePublisher
+from ..services.status_service import StatusService
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
 from .routes.artifacts import router as artifacts_router
 from .version_drift import VersionDriftError, version_drift_error_handler
@@ -44,6 +51,7 @@ from .routes.health import router as health_router
 from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
 from .routes.metrics import router as metrics_router
+from .routes.status import router as status_router
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +179,18 @@ def create_app(
         qr_gen = QRGenerator(module_cache)
         bulk_service = BulkService(ingestion, core, lifecycle_publisher)
         external_service = ExternalService(ingestion, core, irn_gen, qr_gen)
+        batch_external_service = BatchExternalService(ingestion, core, irn_gen, qr_gen)
         finalize_service = FinalizeService(core, lifecycle_publisher)
+        status_service = StatusService(heartbeat, core)
+
+        # AMQP consumer (Q37 Gap #6) — optional, non-fatal.
+        # The tenant_registry from load_tenants() is keyed by api_key; AMQP
+        # messages identify tenants by tenant_id.  Build a tenant_id-keyed
+        # index so _handle_message() can look up the tenant without scanning.
+        _api_key_registry = tenant_registry if config.tenants_file else {}
+        tenants_by_id = {t.tenant_id: t for t in _api_key_registry.values()}
+        amqp_consumer = AMQPConsumer(config, batch_external_service, tenants_by_id)
+        await amqp_consumer.start()
 
         # Store in app state
         app.state.config = config
@@ -186,8 +205,28 @@ def create_app(
         app.state.ingestion = ingestion
         app.state.bulk_service = bulk_service
         app.state.external_service = external_service
+        app.state.batch_external_service = batch_external_service
         app.state.lifecycle_publisher = lifecycle_publisher
         app.state.finalize_service = finalize_service
+        app.state.status_service = status_service
+        app.state.amqp_consumer = amqp_consumer
+
+        # Q37 Gap #2 — OAuth JWKS validator (optional, gated on RELAY_JWKS_URL).
+        # Instantiated only when the URL is configured; otherwise oauth_validator
+        # is None and the dispatcher falls through to the introspect path for all
+        # Bearer JWTs. The httpx client is closed in shutdown below.
+        _jwks_http_client: Optional[httpx.AsyncClient] = None
+        if config.jwks_url:
+            _jwks_http_client = httpx.AsyncClient(timeout=10.0)
+            jwks_cache = JWKSCache(
+                jwks_url=config.jwks_url,
+                http_client=_jwks_http_client,
+            )
+            app.state.oauth_validator = OAuthTokenValidator(jwks_cache)
+            logger.info(f"OAuth JWKS validator enabled — {config.jwks_url}")
+        else:
+            app.state.oauth_validator = None
+            logger.info("OAuth JWKS validator disabled (RELAY_JWKS_URL not set)")
 
         # Envelope placeholder (NaCl encryption configured later)
         app.state.envelope = None
@@ -196,10 +235,13 @@ def create_app(
 
         # ── Shutdown ─────────────────────────────────────────────────
         logger.info("Relay-API shutting down")
+        await amqp_consumer.stop()
         await heartbeat.close()
         await introspect_client.close()
         await redis_client.close()
         await module_cache.cleanup()
+        if _jwks_http_client is not None:
+            await _jwks_http_client.aclose()
 
     app = FastAPI(
         title="Relay-API",
@@ -229,5 +271,6 @@ def create_app(
     app.include_router(internal_router)
     app.include_router(duplicate_router)
     app.include_router(artifacts_router)
+    app.include_router(status_router)
 
     return app
