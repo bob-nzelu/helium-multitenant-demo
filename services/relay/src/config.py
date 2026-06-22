@@ -73,6 +73,22 @@ class RelayConfig:
     module_cache_refresh_interval_s: int = 43200  # 12 hours
     internal_service_token: str = ""              # For /internal/ auth from HeartBeat
 
+    # ── HeartBeat JWKS (Ed25519 public keys) ─────────────────────────────
+    # Base JWKS endpoint — HeartBeat's OAuth signing keys, served as
+    # OKP/Ed25519 JWKs at /.well-known/jwks.json (RELAY_JWKS_URL).
+    jwks_url: str = "http://localhost:9000/.well-known/jwks.json"
+    # L5 webhook receiver: the public key HeartBeat signs Ed25519 webhooks
+    # with. PROVISIONAL (see webhook_auth.py NEEDS-FROM-HB) — HB has not
+    # finalized whether the webhook signing key is published on the SAME
+    # /.well-known/jwks.json (a distinct ``kid``, ``use:"sig"``) or on a
+    # DEDICATED endpoint. Empty default = fall back to ``jwks_url``
+    # (the same-JWKS-distinct-kid hypothesis). Override with
+    # RELAY_WEBHOOK_JWKS_URL the moment HB publishes a dedicated endpoint.
+    webhook_jwks_url: str = ""
+    # Replay window for webhook timestamps (seconds). PROVISIONAL — HB to
+    # confirm. Mirrors the 300s used by the symmetric receiver this replaces.
+    webhook_replay_window_s: int = 300
+
     # ── Redis (rate limiting) ───────────────────────────────────────────
     redis_url: str = ""                 # Empty = disabled (graceful degradation)
     redis_prefix: str = "relay"
@@ -235,6 +251,14 @@ class RelayConfig:
             kwargs["module_cache_refresh_interval_s"] = int(v)
         if v := env("INTERNAL_SERVICE_TOKEN"):
             kwargs["internal_service_token"] = v
+
+        # ── HeartBeat JWKS (Ed25519)
+        if v := env("JWKS_URL"):
+            kwargs["jwks_url"] = v
+        if v := env("WEBHOOK_JWKS_URL"):
+            kwargs["webhook_jwks_url"] = v
+        if v := env("WEBHOOK_REPLAY_WINDOW_S"):
+            kwargs["webhook_replay_window_s"] = int(v)
 
         # ── Redis
         if v := env("REDIS_URL"):

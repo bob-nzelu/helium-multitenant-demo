@@ -104,6 +104,22 @@ class JWKSCache:
             await self._refresh()
         return self._keys.get(kid)
 
+    async def get_all_keys(self) -> list[Ed25519PublicKey]:
+        """
+        Return ALL currently-published Ed25519 public keys.
+
+        Used by the L5 webhook verifier, whose locked contract carries no
+        ``kid`` header — the signature must be tried against every published
+        key (HB publishes one signing key, rarely two during rotation).
+
+        Refreshes the JWKS if the cache is stale OR currently empty (cold
+        start / online rotation). Returns ``[]`` if no Ed25519 keys are
+        available after a refresh (cold start + HTTP down).
+        """
+        if self._is_stale() or not self._keys:
+            await self._refresh()
+        return list(self._keys.values())
+
     async def get_raw_jwk(self, kid: str) -> Optional[Dict[str, Any]]:
         """Return the raw JWK dict for this ``kid`` (for debugging / tests)."""
         if self._is_stale() or kid not in self._raw_jwks:

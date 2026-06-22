@@ -180,6 +180,35 @@ class SignatureVerificationFailedError(AuthenticationFailedError):
         super().__init__(message="HMAC signature verification failed.")
 
 
+class WebhookSignatureError(AuthenticationFailedError):
+    """
+    Inbound HeartBeat webhook failed Ed25519 signature verification (L5).
+
+    Raised by :class:`~src.api.webhook_auth.WebhookVerifier` for every
+    rejection on the webhook receive path: missing/malformed headers,
+    unknown ``kid`` (no published webhook key matches), expired timestamp
+    (replay window), tampered body, or a bad signature. Subclasses
+    :class:`AuthenticationFailedError`, so it maps to HTTP **401** with
+    ``error_code="AUTHENTICATION_FAILED"`` via the global
+    ``relay_error_handler`` — no extra handler wiring.
+
+    This REPLACES the symmetric-HMAC ``WebhookAuthError`` (3-header
+    ``sha256=`` shared-secret scheme) per the ARCH "Bob ratification pass"
+    2026-06-19 (ledger L5), which reversed the earlier symmetric ruling.
+    HeartBeat now SIGNS webhooks with Ed25519 (reusing its OAuth JWKS
+    Ed25519 infra); Relay VERIFIES against HB's published webhook public
+    key. There is intentionally no symmetric code path.
+
+    The ``reason`` is kept on the exception for structured logging /
+    metrics; the client-facing ``message`` is deliberately generic so a
+    probe cannot distinguish "unknown kid" from "bad signature".
+    """
+
+    def __init__(self, reason: str = "Webhook signature verification failed"):
+        super().__init__(message="Webhook signature verification failed.")
+        self.reason = reason
+
+
 class TimestampExpiredError(AuthenticationFailedError):
     """Request timestamp outside the 5-minute window."""
 

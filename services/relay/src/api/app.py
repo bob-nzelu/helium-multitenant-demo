@@ -52,6 +52,8 @@ from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
 from .routes.metrics import router as metrics_router
 from .routes.status import router as status_router
+from .routes.webhook import router as webhook_router
+from .webhook_auth import build_webhook_verifier
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +203,14 @@ def create_app(
         else:
             logger.info("Ingest ledger disabled (RELAY_DB_PATH unset)")
 
+        # Webhook receiver (L5) — verifies HB's Ed25519-signed webhooks
+        # against HB's published webhook public key, fetched by ``kid`` via a
+        # JWKSCache. Its own httpx client (closed on shutdown) so the JWKS
+        # fetch is isolated from the s2s clients. PROVISIONAL contract — see
+        # webhook_auth.py NEEDS-FROM-HB. No symmetric HMAC path exists.
+        webhook_jwks_http = httpx.AsyncClient(timeout=config.request_timeout_s)
+        webhook_verifier = build_webhook_verifier(config, webhook_jwks_http)
+
         # Service layer
         ingestion = IngestionService(
             config, heartbeat, core,
@@ -242,6 +252,8 @@ def create_app(
         app.state.finalize_service = finalize_service
         app.state.status_service = status_service
         app.state.amqp_consumer = amqp_consumer
+        app.state.webhook_verifier = webhook_verifier
+        app.state.webhook_jwks_http = webhook_jwks_http
 
         # Q37 Gap #2 — OAuth JWKS validator (optional, gated on RELAY_JWKS_URL).
         # Instantiated only when the URL is configured; otherwise oauth_validator
@@ -276,6 +288,7 @@ def create_app(
             await _jwks_http_client.aclose()
         if ingest_ledger is not None:
             ingest_ledger.close()
+        await webhook_jwks_http.aclose()
 
     app = FastAPI(
         title="Relay-API",
@@ -306,5 +319,6 @@ def create_app(
     app.include_router(duplicate_router)
     app.include_router(artifacts_router)
     app.include_router(status_router)
+    app.include_router(webhook_router)
 
     return app
