@@ -44,6 +44,11 @@ class TestRelayConfigDefaults:
         assert config.redis_prefix == "relay"
         assert config.rate_limit_daily == 500
         assert config.workers == 1
+        # relay.db ingest ledger + retention/prune (Q28)
+        assert config.relay_db_path == ""
+        assert config.relay_db_retention_days == 7      # default ~7d (< 30)
+        assert config.relay_db_max_rows == 500_000
+        assert config.relay_db_prune_every_n == 100
 
     def test_custom_values(self):
         config = RelayConfig(
@@ -206,3 +211,35 @@ class TestRelayConfigFromEnv:
         """Without RELAY_REDIS_URL, redis_url stays empty (disabled)."""
         config = RelayConfig.from_env()
         assert config.redis_url == ""
+
+
+class TestRelayConfigRetention:
+    """relay.db retention/prune knobs (Q28 ratify rider — Bob 2026-06-20)."""
+
+    def test_from_env_retention_knobs(self, monkeypatch):
+        monkeypatch.setenv("RELAY_DB_RETENTION_DAYS", "14")
+        monkeypatch.setenv("RELAY_DB_MAX_ROWS", "250000")
+        monkeypatch.setenv("RELAY_DB_PRUNE_EVERY_N", "250")
+
+        config = RelayConfig.from_env()
+        assert config.relay_db_retention_days == 14
+        assert config.relay_db_max_rows == 250000
+        assert config.relay_db_prune_every_n == 250
+
+    def test_retention_days_clamped_below_30(self, monkeypatch):
+        """Bob's window MUST be < 30 days — any >=30 value is clamped to 29."""
+        monkeypatch.setenv("RELAY_DB_RETENTION_DAYS", "30")
+        assert RelayConfig.from_env().relay_db_retention_days == 29
+        monkeypatch.setenv("RELAY_DB_RETENTION_DAYS", "365")
+        assert RelayConfig.from_env().relay_db_retention_days == 29
+
+    def test_retention_days_floor_is_one(self, monkeypatch):
+        monkeypatch.setenv("RELAY_DB_RETENTION_DAYS", "0")
+        assert RelayConfig.from_env().relay_db_retention_days == 1
+
+    def test_max_rows_and_gate_floored_at_one(self, monkeypatch):
+        monkeypatch.setenv("RELAY_DB_MAX_ROWS", "0")
+        monkeypatch.setenv("RELAY_DB_PRUNE_EVERY_N", "0")
+        config = RelayConfig.from_env()
+        assert config.relay_db_max_rows == 1
+        assert config.relay_db_prune_every_n == 1

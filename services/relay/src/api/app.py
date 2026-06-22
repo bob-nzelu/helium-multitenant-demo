@@ -29,6 +29,7 @@ from ..core.jwks_cache import JWKSCache
 from ..core.module_cache import TransformaModuleCache
 from ..core.oauth_validator import OAuthTokenValidator
 from ..core.qr import QRGenerator
+from ..db.ledger import IngestLedger
 from ..errors import RelayError
 from ..observability.startup_checks import (
     check_clock_skew_against_heartbeat,
@@ -164,8 +165,48 @@ def create_app(
         else:
             logger.warning("Module cache NOT loaded — external flow will return 503")
 
+        # relay.db ingest ledger (Q28 / Frontdoor §2, §6) — durable write-first
+        # idempotency. Guarded: only instantiated when RELAY_DB_PATH is set;
+        # otherwise the ledger is disabled and the synchronous ingest path runs
+        # exactly as before. The per-tenant SQLite file is the LOCKED all-PG
+        # exception (do NOT migrate to PG — Frontdoor §2.3).
+        ingest_ledger: Optional[IngestLedger] = None
+        if config.relay_db_path:
+            try:
+                # Retention/prune knobs (Q28 ratify rider — Bob 2026-06-20).
+                # The prune is WRITE-TRIGGERED inside the ledger (no timer):
+                # piggybacked on every Nth record_received, plus a one-shot
+                # prune on startup. retention_days is clamped < 30 in config.
+                ingest_ledger = IngestLedger(
+                    config.relay_db_path,
+                    retention_days=config.relay_db_retention_days,
+                    max_rows=config.relay_db_max_rows,
+                    prune_every_n=config.relay_db_prune_every_n,
+                )
+                logger.info(
+                    f"Ingest ledger enabled — {config.relay_db_path} "
+                    f"(retention={config.relay_db_retention_days}d, "
+                    f"max_rows={config.relay_db_max_rows}, "
+                    f"prune_every_n={config.relay_db_prune_every_n})"
+                )
+            except Exception as e:
+                # A bad path must not take down the Frontdoor. Degrade to
+                # ledger-disabled (the synchronous path is still correct) and
+                # surface loudly in deploy logs.
+                logger.error(
+                    f"Ingest ledger failed to open ({config.relay_db_path}) — "
+                    f"running WITHOUT durable idempotency: {e}"
+                )
+                ingest_ledger = None
+        else:
+            logger.info("Ingest ledger disabled (RELAY_DB_PATH unset)")
+
         # Service layer
-        ingestion = IngestionService(config, heartbeat, core, redis_client=redis_client)
+        ingestion = IngestionService(
+            config, heartbeat, core,
+            redis_client=redis_client,
+            ledger=ingest_ledger,
+        )
         irn_gen = IRNGenerator(module_cache)
         qr_gen = QRGenerator(module_cache)
         bulk_service = BulkService(ingestion, core)
@@ -193,6 +234,7 @@ def create_app(
         app.state.redis = redis_client
         app.state.config_cache = config_cache
         app.state.module_cache = module_cache
+        app.state.ingest_ledger = ingest_ledger
         app.state.ingestion = ingestion
         app.state.bulk_service = bulk_service
         app.state.external_service = external_service
@@ -232,6 +274,8 @@ def create_app(
         await module_cache.cleanup()
         if _jwks_http_client is not None:
             await _jwks_http_client.aclose()
+        if ingest_ledger is not None:
+            ingest_ledger.close()
 
     app = FastAPI(
         title="Relay-API",

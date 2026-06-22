@@ -11,6 +11,7 @@ from src.services.ingestion import IngestionService, IngestResult
 from src.config import RelayConfig
 from src.clients.core import CoreClient
 from src.clients.redis_client import RedisClient, RateLimitResult
+from src.db.ledger import IngestLedger
 from src.errors import (
     DuplicateFileError,
     NoFilesProvidedError,
@@ -639,3 +640,177 @@ class TestIngestResult:
             file_count=1, total_size_bytes=10,
         )
         assert r.blob_path == ""
+
+
+# ── Q28: relay.db write-first ingest ledger ──────────────────────────────
+
+
+class TestIngestLedgerWiring:
+    """Durable write-first ledger integration with the ingest pipeline.
+
+    The ledger is OPTIONAL: when not passed (RELAY_DB_PATH unset), the pipeline
+    behaves exactly as before. When enabled, the ingest writes a ledger row
+    write-first (received → processed) and a re-ingest of the same bytes
+    replays the prior result without re-running the pipeline.
+    """
+
+    @pytest.fixture
+    def ledger(self, tmp_path):
+        led = IngestLedger(str(tmp_path / "relay.db"))
+        yield led
+        led.close()
+
+    @pytest.fixture
+    def pdf(self):
+        return [("invoice.pdf", b"%PDF-1.4 ledger-test invoice bytes")]
+
+    def _sha(self, files):
+        from helium_hash import sha256_file
+        return sha256_file(files[0][1])
+
+    @pytest.mark.asyncio
+    async def test_row_written_received_then_processed(
+        self, config, heartbeat, core, ledger, pdf
+    ):
+        svc = IngestionService(config, heartbeat, core, ledger=ledger)
+        result = await svc.ingest(pdf, api_key="tenant-x", trace_id="t-led-1")
+
+        row = ledger.lookup("tenant-x", self._sha(pdf))
+        assert row is not None
+        assert row.result == "processed"
+        assert row.received_at is not None
+        assert row.processed_at is not None
+        assert row.data_uuid == result.data_uuid
+
+    @pytest.mark.asyncio
+    async def test_explicit_tenant_id_is_the_key(
+        self, config, heartbeat, core, ledger, pdf
+    ):
+        svc = IngestionService(config, heartbeat, core, ledger=ledger)
+        await svc.ingest(
+            pdf, api_key="api-key-abc", trace_id="t", tenant_id="tenant-explicit"
+        )
+        # Keyed on the explicit tenant_id, not the api_key.
+        assert ledger.lookup("tenant-explicit", self._sha(pdf)) is not None
+        assert ledger.lookup("api-key-abc", self._sha(pdf)) is None
+
+    @pytest.mark.asyncio
+    async def test_duplicate_is_idempotent_replay_pipeline_not_rerun(
+        self, config, core, ledger, pdf
+    ):
+        """Second ingest of the same bytes returns the prior result and does
+        NOT re-run the pipeline (no second blob write)."""
+
+        class CountingHeartBeat(StubHeartBeatClient):
+            write_count = 0
+
+            async def write_blob(self, blob_uuid, filename, file_data,
+                                 metadata=None, jwt_token=None):
+                CountingHeartBeat.write_count += 1
+                return await super().write_blob(
+                    blob_uuid, filename, file_data, metadata, jwt_token
+                )
+
+        hb = CountingHeartBeat()
+        svc = IngestionService(config, hb, core, ledger=ledger)
+
+        first = await svc.ingest(pdf, api_key="tenant-x", trace_id="t-dup-1")
+        assert CountingHeartBeat.write_count == 1
+        assert first.status == "ingested"
+
+        # Same bytes again → idempotent replay.
+        second = await svc.ingest(pdf, api_key="tenant-x", trace_id="t-dup-2")
+        # Pipeline NOT re-run: blob write count is unchanged.
+        assert CountingHeartBeat.write_count == 1
+        # Prior result is replayed (same identity), flagged as duplicate.
+        assert second.status == "duplicate"
+        assert second.data_uuid == first.data_uuid
+        assert second.queue_id == first.queue_id
+        assert second.file_hashes == first.file_hashes
+
+    @pytest.mark.asyncio
+    async def test_different_tenant_same_bytes_not_duplicate(
+        self, config, heartbeat, core, ledger, pdf
+    ):
+        svc = IngestionService(config, heartbeat, core, ledger=ledger)
+        r1 = await svc.ingest(pdf, api_key="tenant-a", trace_id="t")
+        r2 = await svc.ingest(pdf, api_key="tenant-b", trace_id="t")
+        # Tenant isolation: both processed fresh, distinct data_uuids.
+        assert r1.status == "ingested"
+        assert r2.status == "ingested"
+        assert r1.data_uuid != r2.data_uuid
+
+    @pytest.mark.asyncio
+    async def test_error_path_marks_row_error(self, config, core, ledger, pdf):
+        """A blob-write failure marks the ledger row result='error'."""
+
+        class FailWriteHeartBeat(StubHeartBeatClient):
+            async def write_blob(self, blob_uuid, filename, file_data,
+                                 metadata=None, jwt_token=None):
+                raise ConnectionError("MinIO is down")
+
+        svc = IngestionService(config, FailWriteHeartBeat(), core, ledger=ledger)
+        with pytest.raises(InternalError):
+            await svc.ingest(pdf, api_key="tenant-x", trace_id="t-err-1")
+
+        row = ledger.lookup("tenant-x", self._sha(pdf))
+        assert row is not None
+        assert row.result == "error"
+        assert "MinIO is down" in row.error_message
+        assert row.processed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_errored_row_blocks_reingest(self, config, core, ledger, pdf):
+        """After a failure (no replay payload), a re-ingest of the same bytes
+        is rejected as a duplicate rather than silently re-processed — the
+        durable key already saw it."""
+
+        class FailWriteHeartBeat(StubHeartBeatClient):
+            async def write_blob(self, blob_uuid, filename, file_data,
+                                 metadata=None, jwt_token=None):
+                raise ConnectionError("MinIO is down")
+
+        svc = IngestionService(config, FailWriteHeartBeat(), core, ledger=ledger)
+        with pytest.raises(InternalError):
+            await svc.ingest(pdf, api_key="tenant-x", trace_id="t-err-2")
+
+        # Re-ingest of the same bytes → DuplicateFileError (row exists, no replay).
+        with pytest.raises(DuplicateFileError):
+            await svc.ingest(pdf, api_key="tenant-x", trace_id="t-err-3")
+
+    @pytest.mark.asyncio
+    async def test_ledger_disabled_no_regression(
+        self, config, heartbeat, core, pdf
+    ):
+        """With no ledger (RELAY_DB_PATH unset), ingest behaves exactly as
+        before — including re-running on identical bytes (no durable dedup)."""
+        svc = IngestionService(config, heartbeat, core)  # ledger=None
+        r1 = await svc.ingest(pdf, api_key="tenant-x", trace_id="t-off-1")
+        r2 = await svc.ingest(pdf, api_key="tenant-x", trace_id="t-off-2")
+        assert r1.status == "ingested"
+        assert r2.status == "ingested"
+        # No durable idempotency → fresh processing each time (distinct uuids).
+        assert r1.data_uuid != r2.data_uuid
+
+    @pytest.mark.asyncio
+    async def test_replay_survives_new_service_instance(
+        self, config, heartbeat, core, tmp_path, pdf
+    ):
+        """The durable ledger replays across a fresh IngestionService + a fresh
+        ledger handle on the same file (crash/restart survival)."""
+        db = str(tmp_path / "relay.db")
+
+        led1 = IngestLedger(db)
+        svc1 = IngestionService(config, heartbeat, core, ledger=led1)
+        first = await svc1.ingest(pdf, api_key="tenant-x", trace_id="t-surv-1")
+        led1.close()
+
+        # New ledger handle + new service (mimics container restart).
+        led2 = IngestLedger(db)
+        try:
+            svc2 = IngestionService(config, heartbeat, core, ledger=led2)
+            second = await svc2.ingest(pdf, api_key="tenant-x", trace_id="t-surv-2")
+            assert second.status == "duplicate"
+            assert second.data_uuid == first.data_uuid
+        finally:
+            led2.close()
