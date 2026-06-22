@@ -1,0 +1,11 @@
+{
+  "sika": {
+    "api_key":         "${SIKA_API_KEY}",
+    "api_secret":      "${SIKA_API_SECRET}",
+    "service_id":      "${SIKA_SERVICE_ID}",
+    "firs_service_id": "${SIKA_FIRS_SERVICE_ID}",
+    "name":            "Sika",
+    "format_type":     "ubl",
+    "fields":          {}
+  }
+}

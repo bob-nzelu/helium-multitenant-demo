@@ -57,8 +57,14 @@ services:
 
   # ── HeartBeat ──────────────────────────────────────────────────────
   heartbeat:
+    # Gap A — HeartBeat build context.
+    # The demo repo's ./services/heartbeat was DELETED. HeartBeat builds from a
+    # side-by-side checkout of bob-nzelu/helium-services (branch
+    # sika/deploy-integration). deploy_sika.sh clones it as a sibling dir and
+    # exports HEARTBEAT_BUILD_CONTEXT. The default below assumes the canonical
+    # sibling layout: helium-services/ next to helium-multitenant-demo/.
     build:
-      context: ${HEARTBEAT_BUILD_CONTEXT:-./services/heartbeat}
+      context: ${HEARTBEAT_BUILD_CONTEXT:-../helium-services/HeartBeat}
     ports:
       - "9000:9000"
     environment:
@@ -70,23 +76,39 @@ services:
       - HEARTBEAT_AUTH_ENABLED=true
       - HEARTBEAT_MOCK_AUTH=false
       - HEARTBEAT_AUTO_MIGRATE=true
-      - HEARTBEAT_TIER=test
+      - HEARTBEAT_TIER=${HEARTBEAT_TIER:-test}
       - HEARTBEAT_MAX_CONCURRENT_SESSIONS=3
+      # ── Sika demo-phase auth/admin/crypto env (Gap B + §4 secrets) ──
+      # SQLCipher key for the auth DB. Operator supplies in .env (see
+      # .env.sika.example). Empty default keeps the abbey/abmfb shape working.
+      - HEARTBEAT_AUTH_DB_KEY=${HEARTBEAT_AUTH_DB_KEY:-}
+      # Admin API key + admin s2s signing key — the provisioning runner
+      # (helium-services HeartBeat/scripts/provision_tenant.py) authenticates
+      # with these to create the Sika tenant + 10 users.
+      - HEARTBEAT_ADMIN_API_KEY=${HEARTBEAT_ADMIN_API_KEY:-}
+      - HEARTBEAT_ADMIN_S2S_SIGNING_KEY=${HEARTBEAT_ADMIN_S2S_SIGNING_KEY:-}
+      # User-JWT signing key path — HB auto-generates here on first boot if absent.
+      - HEARTBEAT_JWT_PRIVATE_KEY_PATH=${HEARTBEAT_JWT_PRIVATE_KEY_PATH:-/app/databases/jwt_private.pem}
       # HEARTBEAT_DEMO_MODE (not HEARTBEAT_TEST_HARNESS_ENABLED) is the gate
       # the HeartBeat code reads in src/auth/test_harness_manager.py. The
       # name reflects the security intent: demo-mode is the hard gate that
       # production deployments never set, so leaked harness keys cannot
       # mount /api/test/* against a production instance.
-      - HEARTBEAT_DEMO_MODE=true
-      - HEARTBEAT_TEST_HARNESS_KEY_HASH=786ac05ff1f90d133056376fa0a65188cab837fe4450d47d1be924bd54d017d3
+      - HEARTBEAT_DEMO_MODE=${HEARTBEAT_DEMO_MODE:-true}
+      - HEARTBEAT_TEST_HARNESS_KEY_HASH=${HEARTBEAT_TEST_HARNESS_KEY_HASH:-786ac05ff1f90d133056376fa0a65188cab837fe4450d47d1be924bd54d017d3}
       - HEARTBEAT_PG_HOST=postgres
       - HEARTBEAT_PG_PORT=5432
       - HEARTBEAT_PG_USER=${PG_USER:-helium}
       - HEARTBEAT_PG_PASSWORD=${PG_PASSWORD:-helium_demo_2026}
       - HEARTBEAT_PG_DATABASE=${PG_DATABASE:-helium}
-      # Phase 3B: signed license verification (read abbey license while shared container)
-      - HEARTBEAT_LICENSE_PATH=/etc/helium/abbey/license.json
-      - HEARTBEAT_LICENSE_REQUIRED=true
+      # Phase 3B: signed license verification.
+      # Gap B (Sika demo phase): LICENSE_REQUIRED defaults to false here so HB
+      # boots without a signed license. HB will log LICENSE_INVALID at startup
+      # — that is EXPECTED in the demo phase. At go-live (handoff §7/§9) set
+      # HEARTBEAT_LICENSE_REQUIRED=true + HEARTBEAT_DEMO_MODE=false and mount a
+      # KMS-signed non-test license.json (see commented volume below).
+      - HEARTBEAT_LICENSE_PATH=${HEARTBEAT_LICENSE_PATH:-/etc/helium/sika/license.json}
+      - HEARTBEAT_LICENSE_REQUIRED=${HEARTBEAT_LICENSE_REQUIRED:-false}
       # HMAC s2s nonce dedup store (helium-services PR #100 — HMAC_S2S_MIGRATION_SPEC §6).
       # HB defaults to redis://127.0.0.1:6379/0 which won't resolve inside the
       # heartbeat container; explicit redis://redis:6379/0 points at the
@@ -96,9 +118,12 @@ services:
     volumes:
       - heartbeat-data:/app/databases
       - heartbeat-blobs:/app/data/blobs
-      - ./licenses/abbey.license.json:/etc/helium/abbey/license.json:ro
-      - ./licenses/adansi.license.json:/etc/helium/adansi/license.json:ro
-      - ./licenses/redeploy-probe.license.json:/etc/helium/redeploy-probe/license.json:ro
+      # Sika demo phase: NO license mount (HEARTBEAT_LICENSE_REQUIRED=false).
+      # The abbey/adansi/redeploy-probe mounts were removed — those files do
+      # not exist on a Sika box and would fail the bind-mount. At go-live,
+      # uncomment the line below after placing a KMS-signed license at
+      # ./licenses/sika.license.json (handoff §7/§9):
+      # - ./licenses/sika.license.json:/etc/helium/sika/license.json:ro
     depends_on:
       postgres:
         condition: service_healthy

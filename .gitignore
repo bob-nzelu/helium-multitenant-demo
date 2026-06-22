@@ -1,6 +1,12 @@
 __pycache__/
 *.pyc
 .env
+.env.sika
+.env.local
+# Rendered (live) tenants registry — contains real HMAC secrets, minted per
+# box by deploy_sika.sh from config/tenants.sika.template.json + .env.sika.
+# Only the placeholder template is committed.
+config/tenants.json
 *.db
 .venv/
 venv/
