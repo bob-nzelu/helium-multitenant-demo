@@ -299,37 +299,6 @@ class CoreClient(BaseClient):
 
         return await self.call_with_retries(_get_batch)
 
-    async def publish_lifecycle_event(self, frame: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Forward a Relay-originated lifecycle event frame to Core's SSE stream.
-
-        Relay does not host an SSE server (memory "Scout as SSE Driver" — Scout
-        connects to Core). Relay's §B-EventLog obligation is to forward the
-        frame (carrying the client ``trace_id``) so Core's stream echoes it.
-
-        NEEDS-CORE: real endpoint ``POST {core}/api/lifecycle/event`` (or the
-        AMQP exchange in the S3 hardening contract). HTTP stub for Monday.
-
-        Args:
-            frame: the lifecycle frame from ``LifecycleEvent.to_frame()``
-                   ({family, event, source, timestamp, trace_id?, data}).
-
-        Returns:
-            {"accepted": True, "family": str, "trace_id": str}
-        """
-        async def _publish():
-            family = str(frame.get("family") or "")
-            trace = str(frame.get("trace_id") or "")
-            logger.debug(
-                "Core publish_lifecycle_event (stub) — family=%s trace_id=%s",
-                family,
-                trace or "(none)",
-                extra={"trace_id": self.trace_id},
-            )
-            return {"accepted": True, "family": family, "trace_id": trace}
-
-        return await self.call_with_retries(_publish)
-
     async def fetch_lifecycle_artifact(
         self,
         artifact_ref: str,
