@@ -89,6 +89,7 @@ services:
       - HEARTBEAT_ADMIN_S2S_SIGNING_KEY=${HEARTBEAT_ADMIN_S2S_SIGNING_KEY:-}
       # User-JWT signing key path — HB auto-generates here on first boot if absent.
       - HEARTBEAT_JWT_PRIVATE_KEY_PATH=${HEARTBEAT_JWT_PRIVATE_KEY_PATH:-/app/databases/jwt_private.pem}
+      - HEARTBEAT_JWT_PUBLIC_KEY_PATH=${HEARTBEAT_JWT_PUBLIC_KEY_PATH:-/app/databases/jwt_public.pem}
       # HEARTBEAT_DEMO_MODE (not HEARTBEAT_TEST_HARNESS_ENABLED) is the gate
       # the HeartBeat code reads in src/auth/test_harness_manager.py. The
       # name reflects the security intent: demo-mode is the hard gate that

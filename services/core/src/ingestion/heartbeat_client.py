@@ -77,7 +77,7 @@ class HeartBeatBlobClient:
         headers: dict[str, str] = self._auth_headers()
 
         files = {"file": (filename, data, content_type)}
-        form_data: dict[str, str] = {"blob_uuid": blob_uuid}
+        form_data: dict[str, str] = {"blob_uuid": blob_uuid, "filename": filename}
         if company_id:
             form_data["company_id"] = company_id
         if metadata:
