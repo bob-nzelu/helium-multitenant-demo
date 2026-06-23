@@ -25,6 +25,7 @@ from src.ingestion.models import (
     RedFlag,
 )
 from src.ingestion.parsers.registry import ParserRegistry
+from src.finalize.invoice_creator import create_ingest_invoice, create_inbound_invoice
 from src.sse.models import SSEEvent
 
 logger = structlog.get_logger()
@@ -120,6 +121,108 @@ async def enqueue(request: Request, body: EnqueueRequest) -> EnqueueResponse:
         data_uuid=body.data_uuid,
         created_at=now_iso,
     )
+
+
+# ── POST /inbound/seed ─────────────────────────────────────────────────────
+
+
+@router.post("/inbound/seed", status_code=201)
+async def seed_inbound(request: Request) -> dict:
+    """Create an INBOUND, PENDING_REVIEW invoice row (flow 6 substrate).
+
+    Minimal Core endpoint that materialises a supplier-issued invoice the
+    tenant must accept/reject. Body (all optional except company_id):
+
+        {
+          "company_id": "...",            // REQUIRED (buyer = tenant)
+          "invoice_number": "...",
+          "irn": "...",                   // supplier IRN if known
+          "issue_date": "YYYY-MM-DD",
+          "total_amount": 0, "tax_amount": 0,
+          "seller_tin": "...", "seller_name": "...",
+          "buyer_tin": "...",  "buyer_name": "...",
+          "document_type": "COMMERCIAL_INVOICE" | "CREDIT_NOTE" | ...,
+          "currency_code": "NGN",
+          "inbound_payload": {...},
+          "trace_id": "..."
+        }
+    """
+    from fastapi.responses import JSONResponse
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    company_id = (body.get("company_id") or "").strip()
+    if not company_id:
+        return JSONResponse({"error": "company_id is required"}, status_code=400)
+
+    pool = request.app.state.pool
+    sse_manager = request.app.state.sse_manager
+    audit_logger = getattr(request.app.state, "audit_logger", None)
+    trace_id = body.get("trace_id")
+
+    invoice_number = (body.get("invoice_number") or "").strip() or "INBOUND"
+
+    row = None
+    async with get_connection(pool, "invoices") as conn:
+        async with conn.transaction():
+            row = await create_inbound_invoice(
+                conn,
+                company_id=company_id,
+                invoice_number=invoice_number,
+                irn=body.get("irn"),
+                issue_date=body.get("issue_date"),
+                total_amount=float(body.get("total_amount") or 0),
+                tax_amount=float(body.get("tax_amount") or 0),
+                seller_tin=body.get("seller_tin"),
+                seller_name=body.get("seller_name"),
+                buyer_tin=body.get("buyer_tin"),
+                buyer_name=body.get("buyer_name"),
+                document_type=body.get("document_type", "COMMERCIAL_INVOICE"),
+                transaction_type=body.get("transaction_type", "B2B"),
+                currency_code=body.get("currency_code", "NGN"),
+                inbound_payload=body.get("inbound_payload"),
+                trace_id=trace_id,
+            )
+
+    if row is None:
+        return JSONResponse({"error": "Failed to create inbound invoice"}, status_code=500)
+
+    invoice_id = row.get("invoice_id")
+
+    if audit_logger:
+        await audit_logger.log(
+            event_type="invoice.created",
+            entity_type="invoice",
+            entity_id=invoice_id,
+            action="CREATE",
+            company_id=company_id,
+            metadata={"direction": "INBOUND", "inbound_status": "PENDING_REVIEW", "source": "core_inbound"},
+        )
+
+    sse_data = {
+        "invoice_id": invoice_id,
+        "direction": "INBOUND",
+        "inbound_status": "PENDING_REVIEW",
+        "workflow_status": row.get("workflow_status", "COMMITTED"),
+    }
+    if trace_id:
+        sse_data["trace_id"] = trace_id
+    await sse_manager.publish(SSEEvent(
+        event_type="invoice.created",
+        data=sse_data,
+        data_uuid=invoice_id,
+        company_id=company_id,
+    ))
+
+    return {
+        "invoice_id": invoice_id,
+        "helium_invoice_no": row.get("helium_invoice_no"),
+        "direction": "INBOUND",
+        "inbound_status": "PENDING_REVIEW",
+    }
 
 
 # ── GET /core_queue/status ─────────────────────────────────────────────────
@@ -300,6 +403,54 @@ async def process_entry(
                    WHERE queue_id = %s""",
                 (queue_id,),
             )
+
+        # 7b. CREATE-INVOICE: materialise a pre-submission OUTBOUND invoice
+        #     ENTITY row so the doc EXISTS in invoices.invoices before finalize
+        #     (tracker fills; approval/flows can later gate it). Idempotent on
+        #     queue_id; non-fatal — a failure here never fails the queue entry.
+        invoice_row = None
+        try:
+            async with get_connection(pool, "invoices") as conn:
+                invoice_row = await create_ingest_invoice(
+                    conn,
+                    queue_id=queue_id,
+                    company_id=company_id or "",
+                    blob_uuid=blob_uuid,
+                    data_uuid=data_uuid,
+                    original_filename=original_filename,
+                )
+        except Exception:
+            logger.exception("ingest_invoice_create_failed", queue_id=queue_id)
+
+        if invoice_row is not None:
+            # WS6: Audit invoice.created (entity materialised at ingest)
+            if audit_logger:
+                await audit_logger.log(
+                    event_type="invoice.created",
+                    entity_type="invoice",
+                    entity_id=invoice_row.get("invoice_id", queue_id),
+                    action="CREATE",
+                    company_id=company_id or "",
+                    metadata={
+                        "queue_id": queue_id,
+                        "direction": "OUTBOUND",
+                        "workflow_status": invoice_row.get("workflow_status"),
+                        "source": "core_ingest",
+                    },
+                )
+            # SSE so Scout/tracker react immediately (company_id REQUIRED for
+            # ledger durability). No trace_id available on this backend path.
+            await sse_manager.publish(SSEEvent(
+                event_type="invoice.created",
+                data={
+                    "invoice_id": invoice_row.get("invoice_id", queue_id),
+                    "queue_id": queue_id,
+                    "direction": "OUTBOUND",
+                    "workflow_status": invoice_row.get("workflow_status", "COMMITTED"),
+                },
+                data_uuid=invoice_row.get("invoice_id", queue_id),
+                company_id=company_id or None,
+            ))
 
         # 8. Emit SSE event
         await sse_manager.publish(SSEEvent(

@@ -64,8 +64,9 @@ INVOICE_LIST_FIELDS: list[str] = [
     "total_amount",
     "wht_amount",
     "discount_amount",
-    "product_summary",
-    "line_items_count",
+    # NOTE: ``product_summary`` and ``line_items_count`` are NOT columns on the
+    # deployed invoices.invoices table — removed so SELECT does not 500.
+    # (Re-add as a generated/joined field if the SWDB grid needs them.)
     "category",
     "reference",
     "attachment_count",

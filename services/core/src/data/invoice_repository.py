@@ -26,6 +26,18 @@ REFERENCES_TABLE = "invoices.invoice_references"
 ALLOWANCE_CHARGES_TABLE = "invoices.invoice_allowance_charges"
 EDIT_HISTORY_TABLE = "invoices.invoice_edit_history"
 
+# Substring-search fallback (no fts_vector column on deployed schema).
+# Each column gets one %s placeholder bound to ``%<search>%``.
+_SEARCH_COLUMNS = (
+    "invoice_number",
+    "helium_invoice_no",
+    "seller_name",
+    "buyer_name",
+    "reference",
+)
+_SEARCH_CLAUSE = "(" + " OR ".join(f"{c} ILIKE %s" for c in _SEARCH_COLUMNS) + ")"
+_SEARCH_PARAM_COUNT = len(_SEARCH_COLUMNS)
+
 
 async def get_by_id(conn: AsyncConnection, invoice_id: str) -> dict[str, Any] | None:
     """Fetch a single invoice with all child collections."""
@@ -109,23 +121,22 @@ async def list_paginated(
         where_clauses.append("created_at <= %s")
         params.append(date_to)
 
-    fts_rank = ""
+    # NOTE: the deployed invoices.invoices has NO ``fts_vector`` column.
+    # Substring search across the real display/identity columns instead.
     if search:
-        where_clauses.append("fts_vector @@ websearch_to_tsquery('english', %s)")
-        params.append(search)
-        fts_rank = ", ts_rank(fts_vector, websearch_to_tsquery('english', %s)) AS relevance"
-        params.append(search)
+        where_clauses.append(_SEARCH_CLAUSE)
+        params.extend([f"%{search}%"] * _SEARCH_PARAM_COUNT)
 
     where = " AND ".join(where_clauses)
 
     sort_order = "ASC" if sort_order.lower() == "asc" else "DESC"
-    order = f"relevance DESC, {sort_by} {sort_order}" if search else f"{sort_by} {sort_order}"
+    order = f"{sort_by} {sort_order}"
 
     offset = (page - 1) * per_page
     params.extend([per_page, offset])
 
     sql = f"""
-        SELECT {fields}{fts_rank}
+        SELECT {fields}
         FROM {TABLE}
         WHERE {where}
         ORDER BY {order}
@@ -179,8 +190,8 @@ async def get_count(
         params.append(date_to)
 
     if search:
-        where_clauses.append("fts_vector @@ websearch_to_tsquery('english', %s)")
-        params.append(search)
+        where_clauses.append(_SEARCH_CLAUSE)
+        params.extend([f"%{search}%"] * _SEARCH_PARAM_COUNT)
 
     where = " AND ".join(where_clauses)
     sql = f"SELECT COUNT(*) FROM {TABLE} WHERE {where}"
@@ -204,8 +215,11 @@ async def update_fields(
         set_parts.append(f"{field_name} = %s")
         params.append(value)
 
-    set_parts.append("updated_by = %s")
-    params.append(updated_by)
+    # NOTE: the deployed invoices.invoices has NO ``updated_by`` column —
+    # provenance of the change is recorded in invoice_edit_history via
+    # edit_history_repository (changed_by), so we do not write it here.
+    # ``updated_at`` IS auto-maintained by trigger trg_invoices_updated_at,
+    # but we set it explicitly too so the RETURNING row is immediately fresh.
     set_parts.append("updated_at = %s")
     params.append(datetime.now(timezone.utc).isoformat())
 

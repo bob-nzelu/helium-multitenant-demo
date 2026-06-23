@@ -43,7 +43,13 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from src.database.pool import get_connection
 from src.finalize.edge_client import EdgeClient, EdgeSubmission
+from src.finalize.invoice_creator import (
+    create_finalize_invoice,
+    find_by_ref,
+    mark_transmitted,
+)
 from src.finalize.irn_generator import generate_irn, IRNError
 from src.finalize.qr_generator import QRInput, generate_qr_code, QRError
 from src.sse.models import SSEEvent
@@ -281,6 +287,55 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
     accepted = edge_status in ("STUB_ACCEPTED", "completed", "ACCEPTED")
     lifecycle_status = "submitted" if accepted else "submission_failed"
 
+    # ── Step 3b: Link finalize to the invoice ENTITY row ──────────────────
+    # The doc was (usually) pre-created at ingest as a COMMITTED OUTBOUND row
+    # keyed on queue_id == invoice_id (which equals the finalize ``ref``).
+    # On Edge accept: resolve it and flip to TRANSMITTED + real IRN. If no row
+    # exists (direct finalize that skipped ingestion), create one already
+    # TRANSMITTED. Non-fatal: a DB hiccup must not break the submit chain.
+    linked_invoice_id: str | None = None
+    if accepted:
+        pool = getattr(request.app.state, "pool", None)
+        if pool is not None:
+            try:
+                async with get_connection(pool, "invoices") as conn:
+                    async with conn.transaction():
+                        existing = await find_by_ref(conn, ref)
+                        if existing is None and document_id:
+                            existing = await find_by_ref(conn, document_id)
+                        if existing is not None:
+                            updated = await mark_transmitted(
+                                conn,
+                                invoice_pk=existing["id"],
+                                irn=irn,
+                                total_amount=total_amount or None,
+                                tax_amount=tax_amount or None,
+                            )
+                            linked_invoice_id = (updated or existing).get("invoice_id")
+                        else:
+                            created = await create_finalize_invoice(
+                                conn,
+                                ref=ref,
+                                company_id=company_id,
+                                invoice_number=invoice_number,
+                                irn=irn,
+                                issue_date=issue_date,
+                                total_amount=total_amount,
+                                tax_amount=tax_amount,
+                                seller_tin=seller_tin,
+                                seller_name=body.get("seller_name"),
+                                buyer_tin=body.get("buyer_tin"),
+                                buyer_name=body.get("buyer_name"),
+                                direction=direction,
+                                currency_code=body.get("currency_code", "NGN"),
+                                blob_uuid=document_id,
+                                trace_id=trace_id or None,
+                            )
+                            if created is not None:
+                                linked_invoice_id = created.get("invoice_id")
+            except Exception:
+                logger.exception("lean_finalize_invoice_link_failed: ref=%s", ref)
+
     result: dict[str, Any] = {
         "ref": ref,
         "trace_id": trace_id,
@@ -291,6 +346,7 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
         "firs_confirmation": firs_confirmation,
         "edge_status": edge_status,
         "document_id": document_id,
+        "invoice_id": linked_invoice_id or document_id,
         "invoice_number": invoice_number,
         "issue_date": issue_date,
         "service_id": service_id,
@@ -329,7 +385,7 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
 
     terminal_data: dict[str, Any] = {
         "document_id": document_id,
-        "invoice_id": document_id,
+        "invoice_id": linked_invoice_id or document_id,
         "submission_id": firs_confirmation or "",
         "lifecycle_status": lifecycle_status,
         "irn": irn,
