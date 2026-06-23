@@ -368,60 +368,62 @@ async def events_stream(request: Request) -> Response:
         # Open framing comment so proxies flush headers immediately.
         yield ": connected\n\n"
 
+        import httpx as _httpx
+
         cur_event = "message"
         data_lines: list[str] = []
 
+        _headers = {
+            "Authorization": f"Bearer {jwt_token}",
+            "Accept": "text/event-stream",
+        }
+        if last_event_id:
+            _headers["Last-Event-ID"] = last_event_id
+        _url = f"{core.core_api_url}/api/sse/stream"
+
         try:
-            async for line in core.open_events_stream(
-                jwt_token=jwt_token,
-                pattern=None,
-                data_uuid=None,
-                last_event_id=last_event_id,
-            ):
-                # WHATWG SSE line parsing on Core's stream.
-                if line == "":
-                    # Blank line -> dispatch the buffered Core frame.
-                    if data_lines:
-                        raw = "\n".join(data_lines)
-                        try:
-                            envelope = json.loads(raw)
-                        except (json.JSONDecodeError, TypeError):
-                            envelope = None
-                        if isinstance(envelope, dict):
-                            reframed = _reframe_core_envelope(cur_event, envelope)
-                            if reframed:
-                                yield reframed
-                    cur_event = "message"
-                    data_lines = []
-                    continue
-
-                if line.startswith(":"):
-                    # Core keep-alive comment -> forward a keep-alive so our
-                    # client's connection stays warm.
-                    yield ": keepalive\n\n"
-                    continue
-
-                if line.startswith("event:"):
-                    cur_event = line[len("event:"):].strip()
-                    continue
-
-                if line.startswith("data:"):
-                    chunk = line[len("data:"):]
-                    if chunk.startswith(" "):
-                        chunk = chunk[1:]
-                    data_lines.append(chunk)
-                    continue
-
-                # id: / retry: and anything else -> ignore (Core's id is not
-                # relied upon; correlation is data.trace_id).
-                continue
-        except Exception as exc:  # noqa: BLE001 — stream end is non-fatal
-            # A dropped/failed upstream stream ends our generator cleanly; the
-            # replicator reconnects with bounded backoff.
+            async with _httpx.AsyncClient(
+                timeout=_httpx.Timeout(None, connect=10.0)
+            ) as _client:
+                async with _client.stream("GET", _url, headers=_headers) as _resp:
+                    if _resp.status_code != 200:
+                        logger.info(
+                            "[%s] /api/events upstream non-200: %s",
+                            trace_id, _resp.status_code,
+                        )
+                        return
+                    async for line in _resp.aiter_lines():
+                        if line == "":
+                            if data_lines:
+                                raw = "\n".join(data_lines)
+                                try:
+                                    envelope = json.loads(raw)
+                                except (json.JSONDecodeError, TypeError):
+                                    envelope = None
+                                if isinstance(envelope, dict):
+                                    reframed = _reframe_core_envelope(cur_event, envelope)
+                                    if reframed:
+                                        yield reframed
+                            cur_event = "message"
+                            data_lines = []
+                            continue
+                        if line.startswith(":"):
+                            yield ": keepalive\n\n"
+                            continue
+                        if line.startswith("event:"):
+                            cur_event = line[len("event:"):].strip()
+                            continue
+                        if line.startswith("data:"):
+                            chunk = line[len("data:"):]
+                            if chunk.startswith(" "):
+                                chunk = chunk[1:]
+                            data_lines.append(chunk)
+                            continue
+                        continue
+        except Exception as exc:  # noqa: BLE001
             logger.info(
                 "[%s] /api/events upstream ended: %s",
-                trace_id,
-                exc,
+                trace_id, exc,
             )
             return
 
