@@ -76,6 +76,44 @@ async def get_by_id(conn: AsyncConnection, invoice_id: str) -> dict[str, Any] | 
     return invoice
 
 
+def _scope_clauses(
+    where_clauses: list[str],
+    params: list,
+    *,
+    company_id: str | None,
+    actor_user_id: str | None,
+    actor_can_see_all: bool,
+) -> None:
+    """Append per-tenant + per-actor visibility predicates in place.
+
+    Relay-readside cutover (my_documents): the deployed invoices.invoices list
+    endpoint historically returned EVERY tenant's rows unfiltered. Relay now
+    forwards the introspected JWT's company + actor so the list is scoped
+    server-side (the replicator NEVER filters by actor).
+
+      * ``company_id`` -> strict tenant isolation (always applied when given).
+      * Actor visibility (Reader flow 11): a privileged actor
+        (``actor_can_see_all`` -- admin / approver role) sees the whole company
+        slice. A non-privileged actor sees only the rows they own/created PLUS
+        every INBOUND document (supplier invoices land in the tenant's shared
+        inbound tray, not under a single creator). Outbound rows created by a
+        sibling user are hidden from a non-privileged actor.
+    """
+    if company_id:
+        where_clauses.append("company_id = %s")
+        params.append(company_id)
+
+    if actor_user_id and not actor_can_see_all:
+        # Own/created OR any inbound document. created_by + helium_user_id are
+        # both checked because the ingest/finalize path stamps creator identity
+        # on either column depending on the flow.
+        where_clauses.append(
+            "(created_by = %s OR helium_user_id = %s OR direction = 'INBOUND')"
+        )
+        params.append(actor_user_id)
+        params.append(actor_user_id)
+
+
 async def list_paginated(
     conn: AsyncConnection,
     *,
@@ -90,11 +128,28 @@ async def list_paginated(
     date_from: str | None = None,
     date_to: str | None = None,
     search: str | None = None,
+    company_id: str | None = None,
+    actor_user_id: str | None = None,
+    actor_can_see_all: bool = True,
 ) -> list[dict[str, Any]]:
-    """Fetch paginated invoice list items with filters."""
+    """Fetch paginated invoice list items with filters.
+
+    ``company_id`` / ``actor_user_id`` / ``actor_can_see_all`` add the
+    tenant + per-actor visibility scope used by the Relay my_documents
+    cutover (see :func:`_scope_clauses`). They default to the legacy
+    unscoped behaviour (no company filter, see-all) so existing callers
+    are unchanged.
+    """
     fields = ", ".join(INVOICE_LIST_FIELDS)
     where_clauses = ["deleted_at IS NULL"]
     params: list = []
+
+    _scope_clauses(
+        where_clauses, params,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        actor_can_see_all=actor_can_see_all,
+    )
 
     if status:
         placeholders = ", ".join(["%s"] * len(status))
@@ -159,10 +214,20 @@ async def get_count(
     date_from: str | None = None,
     date_to: str | None = None,
     search: str | None = None,
+    company_id: str | None = None,
+    actor_user_id: str | None = None,
+    actor_can_see_all: bool = True,
 ) -> int:
-    """Count invoice records matching filters."""
+    """Count invoice records matching filters (tenant + actor scoped)."""
     where_clauses = ["deleted_at IS NULL"]
     params: list = []
+
+    _scope_clauses(
+        where_clauses, params,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        actor_can_see_all=actor_can_see_all,
+    )
 
     if status:
         placeholders = ", ".join(["%s"] * len(status))

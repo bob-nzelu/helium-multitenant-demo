@@ -66,8 +66,27 @@ async def list_invoices(
     date_from: str | None = Query(default=None),
     date_to: str | None = Query(default=None),
     search: str | None = Query(default=None),
+    company_id: str | None = Query(
+        default=None,
+        description="Tenant scope (forwarded by Relay from the introspected JWT)",
+    ),
+    actor_user_id: str | None = Query(
+        default=None,
+        description="Per-actor visibility scope (Reader flow 11), forwarded by Relay",
+    ),
+    actor_can_see_all: bool = Query(
+        default=True,
+        description="True => actor sees the whole company slice (admin/approver); "
+        "False => own/created + inbound only",
+    ),
 ):
-    """Paginated invoice list with filtering and sorting."""
+    """Paginated invoice list with filtering and sorting.
+
+    ``company_id`` / ``actor_user_id`` / ``actor_can_see_all`` are the
+    tenant + per-actor scope forwarded by Relay's ``GET /api/my_documents``
+    bridge (derived from the introspected user JWT — the user never sets
+    them directly). Omitting them preserves the legacy unscoped behaviour.
+    """
 
     status_list = status.split(",") if status else None
 
@@ -80,6 +99,11 @@ async def list_invoices(
             )
 
     pool = request.app.state.pool
+    scope_kwargs = dict(
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        actor_can_see_all=actor_can_see_all,
+    )
     filter_kwargs = dict(
         page=page, per_page=per_page,
         sort_by=sort_by, sort_order=sort_order,
@@ -87,6 +111,7 @@ async def list_invoices(
         document_type=document_type, transaction_type=transaction_type,
         date_from=date_from, date_to=date_to,
         search=search if search else None,
+        **scope_kwargs,
     )
 
     async with get_connection(pool, "public") as conn:
@@ -97,6 +122,7 @@ async def list_invoices(
             document_type=document_type, transaction_type=transaction_type,
             date_from=date_from, date_to=date_to,
             search=search if search else None,
+            **scope_kwargs,
         )
 
     return PaginatedEnvelope.build(items, total_count, page, per_page)

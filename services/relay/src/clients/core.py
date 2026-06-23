@@ -859,6 +859,179 @@ class CoreClient(BaseClient):
 
         return await self.call_with_retries(_reject)
 
+    async def list_invoices(
+        self,
+        company_id: str,
+        actor_user_id: str = "",
+        actor_can_see_all: bool = True,
+        page: int = 1,
+        per_page: int = 200,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        status: Optional[str] = None,
+        direction: Optional[str] = None,
+        document_type: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        search: Optional[str] = None,
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Read-side cutover (my_documents bridge) — Core's tenant + actor scoped
+        invoice list.
+
+        Real call: ``GET {core}/api/v1/invoices`` with the per-tenant + per-actor
+        scope forwarded as query params (Core derives nothing from a JWT on this
+        route — Relay introspects the user JWT and injects the scope):
+
+            ?company_id=<tenant>&actor_user_id=<uid>&actor_can_see_all=<bool>
+            &page=&per_page=&sort_by=&sort_order=&status=&direction=
+            &document_type=&date_from=&date_to=&search=
+
+        Core returns a ``PaginatedEnvelope``:
+            {total_count, page, per_page, total_pages, has_next, has_previous,
+             items: [ <invoice list row>, ... ]}
+
+        The ``items`` rows carry the Core INVOICE_LIST_FIELDS shape (invoice_id,
+        workflow_status, payment_status, direction, seller_name, buyer_name,
+        total_amount, tax_amount, wht_amount, invoice_number, helium_invoice_no,
+        created_at, ...). The Relay my_documents route maps these onto the
+        replicator's BackendDocument row shape.
+
+        Args:
+            company_id: tenant scope (REQUIRED — strict isolation server-side).
+            actor_user_id: the introspected user id (flow-11 visibility).
+            actor_can_see_all: True for admin/approver (whole company slice),
+                False for a line user (own/created + inbound only).
+            page/per_page/...: pass-through list filters.
+            jwt_token: forwarded as Bearer for attribution only.
+
+        Returns:
+            Core's PaginatedEnvelope dict (``items`` is the row list).
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx.
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        params: Dict[str, Any] = {
+            "company_id": company_id,
+            "actor_can_see_all": "true" if actor_can_see_all else "false",
+            "page": page,
+            "per_page": per_page,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+        }
+        if actor_user_id:
+            params["actor_user_id"] = actor_user_id
+        if status:
+            params["status"] = status
+        if direction:
+            params["direction"] = direction
+        if document_type:
+            params["document_type"] = document_type
+        if date_from:
+            params["date_from"] = date_from
+        if date_to:
+            params["date_to"] = date_to
+        if search:
+            params["search"] = search
+
+        async def _list():
+            http = self._get_http()
+            self._calls.append(("list_invoices", company_id, actor_user_id))
+            try:
+                resp = await http.get(
+                    "/api/v1/invoices",
+                    params=params,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for invoice list: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "list_invoices")
+            result = resp.json()
+            if not isinstance(result, dict):
+                # Defensive: Core contract is a PaginatedEnvelope object.
+                result = {"items": result if isinstance(result, list) else []}
+            logger.debug(
+                "Core list_invoices — company=%s actor=%s count=%s",
+                company_id,
+                actor_user_id or "(all)",
+                result.get("total_count"),
+                extra={"trace_id": self.trace_id},
+            )
+            return result
+
+        return await self.call_with_retries(_list)
+
+    async def open_events_stream(
+        self,
+        jwt_token: str,
+        pattern: Optional[str] = None,
+        data_uuid: Optional[str] = None,
+        last_event_id: Optional[str] = None,
+    ):
+        """
+        Open Core's live SSE stream (``GET {core}/api/sse/stream``) and yield raw
+        decoded text lines as they arrive.
+
+        Core scopes the stream to the JWT's ``company_id`` server-side
+        (manager._client_matches), validates the EdDSA JWT, and frames events as
+        ``event:``/``id:``/``data:`` with a ``:keepalive`` comment every 15s. We
+        forward the user JWT as Bearer and stream the response body verbatim so
+        Relay's ``/api/events`` route can re-frame Core's envelope into the names
+        the Reader replicator routes and synthesise ``documents_changed``.
+
+        This uses a DEDICATED httpx client with no read timeout (long-lived
+        stream), connect-timeout 10s — independent of the shared request client.
+
+        Yields:
+            str: one raw line of the SSE text/event-stream (without trailing
+            newline). Caller is responsible for SSE parsing.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a non-200 (incl.
+                an auth-fail 401 — surfaced so the route can map it).
+        """
+        headers = dict(self.get_trace_headers())
+        headers["Authorization"] = f"Bearer {jwt_token}"
+        headers["Accept"] = "text/event-stream"
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
+
+        params: Dict[str, Any] = {}
+        if pattern:
+            params["pattern"] = pattern
+        if data_uuid:
+            params["data_uuid"] = data_uuid
+
+        url = f"{self.core_api_url}/api/sse/stream"
+        # No read timeout (long-lived); bounded connect timeout.
+        timeout = httpx.Timeout(None, connect=10.0)
+        client = httpx.AsyncClient(timeout=timeout)
+        try:
+            async with client.stream(
+                "GET", url, params=params, headers=headers
+            ) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    raise CoreUnavailableError(
+                        message=(
+                            f"Core SSE stream failed ({resp.status_code}): "
+                            f"{body[:200]!r}"
+                        )
+                    )
+                async for line in resp.aiter_lines():
+                    yield line
+        except httpx.ConnectError as e:
+            raise CoreUnavailableError(
+                message=f"Cannot connect to Core for SSE stream: {e}"
+            ) from e
+        finally:
+            await client.aclose()
+
     async def get_invoice_status(
         self,
         transaction_id: Optional[str] = None,

@@ -45,6 +45,7 @@ from ..services.status_service import StatusService
 from .middleware import BodyCacheMiddleware, TraceIDMiddleware, relay_error_handler
 from .routes.artifacts import router as artifacts_router
 from .version_drift import VersionDriftError, version_drift_error_handler
+from .routes.documents import router as documents_router
 from .routes.duplicate import router as duplicate_router
 from .routes.finalize import router as finalize_router
 from .routes.lifecycle import router as lifecycle_router
@@ -323,5 +324,8 @@ def create_app(
     app.include_router(artifacts_router)
     app.include_router(status_router)
     app.include_router(webhook_router)
+    # Reader read-side bridge: GET /api/my_documents, GET /api/events (SSE),
+    # POST /api/blobs/fetch — the surfaces the Reader replicator reads.
+    app.include_router(documents_router)
 
     return app
