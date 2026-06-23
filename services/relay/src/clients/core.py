@@ -663,6 +663,197 @@ class CoreClient(BaseClient):
 
         return await self.call_with_retries(_reverse)
 
+    # ── Phase-2 stage 3 approval (flows 7 / 8) ─────────────────────────────
+    #
+    # Forward Reader-initiated approval actions to Core's Phase-2 approval
+    # handlers (services/core/src/api/approval.py). Same plumbing as the
+    # lifecycle methods above: real httpx POST, trace headers + optional Bearer
+    # JWT for attribution, non-2xx surfaced (no silent swallow), Core's JSON
+    # result returned verbatim (the approval event id/family Core emitted).
+
+    async def approval_request(
+        self,
+        invoice_id: str,
+        trace_id: str = "",
+        target_actor_id: str = "",
+        request_type: str = "",
+        actor_user_id: str = "",
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 7 — request approval for an invoice (Core flips approval_status
+        -> 'PENDING_APPROVAL', writes an approval_events 'requested' row, and
+        emits ``core.approval.requested``).
+
+        Real call: ``POST {core}/api/v1/approval/request``
+            body: {"invoice_id": <id>, "target_actor_id": <opt>,
+                   "request_type": <opt>, "trace_id": <uuidv7>,
+                   "actor_user_id": <opt override>}
+        404 if the invoice is absent. Returns Core's result JSON verbatim.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx.
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        payload: Dict[str, Any] = {
+            "invoice_id": invoice_id,
+            "trace_id": trace_id,
+        }
+        if target_actor_id:
+            payload["target_actor_id"] = target_actor_id
+        if request_type:
+            payload["request_type"] = request_type
+        if actor_user_id:
+            payload["actor_user_id"] = actor_user_id
+
+        async def _request():
+            http = self._get_http()
+            self._calls.append(("approval_request", invoice_id, trace_id))
+            try:
+                resp = await http.post(
+                    "/api/v1/approval/request",
+                    json=payload,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for approval/request: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "approval_request")
+            result = resp.json()
+            logger.info(
+                "Core approval/request — invoice_id=%s trace_id=%s",
+                invoice_id,
+                trace_id or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            result.setdefault("invoice_id", invoice_id)
+            result.setdefault("trace_id", trace_id)
+            return result
+
+        return await self.call_with_retries(_request)
+
+    async def approval_approve(
+        self,
+        invoice_id: str,
+        trace_id: str = "",
+        reason: str = "",
+        actor_user_id: str = "",
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 8 (approve) — approve a PENDING_APPROVAL invoice (Core flips
+        approval_status -> 'APPROVED', writes an approval_events 'approved' row,
+        and emits ``core.approval.action_confirmed``).
+
+        Real call: ``POST {core}/api/v1/approval/approve``
+            body: {"invoice_id": <id>, "trace_id": <uuidv7>, "reason": <opt>,
+                   "actor_user_id": <opt override>}
+        Core guards approval_status='PENDING_APPROVAL' — 409 if already actioned,
+        404 if absent. Returns Core's result JSON verbatim.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx (incl. 409
+                already-actioned and 404 absent, surfaced as a Core error).
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        payload: Dict[str, Any] = {
+            "invoice_id": invoice_id,
+            "trace_id": trace_id,
+        }
+        if reason:
+            payload["reason"] = reason
+        if actor_user_id:
+            payload["actor_user_id"] = actor_user_id
+
+        async def _approve():
+            http = self._get_http()
+            self._calls.append(("approval_approve", invoice_id, trace_id))
+            try:
+                resp = await http.post(
+                    "/api/v1/approval/approve",
+                    json=payload,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for approval/approve: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "approval_approve")
+            result = resp.json()
+            logger.info(
+                "Core approval/approve — invoice_id=%s trace_id=%s",
+                invoice_id,
+                trace_id or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            result.setdefault("invoice_id", invoice_id)
+            result.setdefault("trace_id", trace_id)
+            return result
+
+        return await self.call_with_retries(_approve)
+
+    async def approval_reject(
+        self,
+        invoice_id: str,
+        reason: str,
+        trace_id: str = "",
+        actor_user_id: str = "",
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 8 (reject) — reject an invoice's approval (Core flips
+        approval_status -> 'REJECTED', writes an approval_events 'rejected' row
+        carrying the reason, and emits ``core.approval.action_failed`` with
+        failure_reason=reason). ``reason`` is required by Core (422 if missing).
+
+        Real call: ``POST {core}/api/v1/approval/reject``
+            body: {"invoice_id": <id>, "reason": <required>, "trace_id": <uuidv7>,
+                   "actor_user_id": <opt override>}
+        404 if the invoice is absent. Returns Core's result JSON verbatim.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx.
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        payload: Dict[str, Any] = {
+            "invoice_id": invoice_id,
+            "reason": reason,
+            "trace_id": trace_id,
+        }
+        if actor_user_id:
+            payload["actor_user_id"] = actor_user_id
+
+        async def _reject():
+            http = self._get_http()
+            self._calls.append(("approval_reject", invoice_id, trace_id))
+            try:
+                resp = await http.post(
+                    "/api/v1/approval/reject",
+                    json=payload,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for approval/reject: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "approval_reject")
+            result = resp.json()
+            logger.info(
+                "Core approval/reject — invoice_id=%s trace_id=%s",
+                invoice_id,
+                trace_id or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            result.setdefault("invoice_id", invoice_id)
+            result.setdefault("trace_id", trace_id)
+            return result
+
+        return await self.call_with_retries(_reject)
+
     async def get_invoice_status(
         self,
         transaction_id: Optional[str] = None,

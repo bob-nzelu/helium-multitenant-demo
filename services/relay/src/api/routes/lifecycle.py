@@ -371,3 +371,213 @@ async def reverse(request: Request):
             "core": result,
         },
     )
+
+
+# ── Flow 7 — request approval ───────────────────────────────────────────────
+
+
+@router.post(
+    "/api/approval/request",
+    summary="Request approval for an invoice (flow 7, no bytes)",
+    dependencies=[Depends(version_drift_guard)],
+    responses={
+        202: {"description": "Approval request accepted"},
+        400: {"description": "Missing invoice_id / invalid body"},
+        401: {"description": "Authentication failed"},
+        404: {"description": "Invoice not found"},
+        409: {"description": "Version drift"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+async def approval_request(request: Request):
+    """
+    Flow 7 — forward an approval request to Core.
+
+    Body: {"invoice_id": <id>, "target_actor_id": <opt>, "request_type": <opt>,
+           "trace_id": <uuidv7>}
+    Core flips approval_status='PENDING_APPROVAL', writes an approval_events
+    'requested' row, and emits ``core.approval.requested``.
+    """
+    ctx: CallerContext = await authenticate_request(request)
+    trace_state = getattr(request.state, "trace_id", "")
+    body = await _read_json_body(request)
+
+    invoice_id = str(body.get("invoice_id") or "").strip()
+    target_actor_id = str(body.get("target_actor_id") or "").strip()
+    request_type = str(body.get("request_type") or "").strip()
+    trace_id = str(body.get("trace_id") or "").strip()
+
+    if not invoice_id:
+        raise ValidationFailedError(message="approval/request requires 'invoice_id'.")
+
+    jwt_token = _user_jwt(request, ctx)
+
+    logger.info(
+        "[%s] POST /api/approval/request — invoice_id=%s target=%s type=%s trace_id=%s actor=%s jwt=%s",
+        trace_state,
+        invoice_id,
+        target_actor_id or "(none)",
+        request_type or "(none)",
+        trace_id or "(none)",
+        ctx.actor_type,
+        "yes" if jwt_token else "no",
+    )
+
+    core = request.app.state.core
+    result = await core.approval_request(
+        invoice_id=invoice_id,
+        trace_id=trace_id,
+        target_actor_id=target_actor_id,
+        request_type=request_type,
+        actor_user_id=ctx.identifier if ctx.is_user else "",
+        jwt_token=jwt_token,
+    )
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "call": "approval-request",
+            "invoice_id": invoice_id,
+            "trace_id": trace_id,
+            "core": result,
+        },
+    )
+
+
+# ── Flow 8 — approve ────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/api/approval/approve",
+    summary="Approve a pending invoice (flow 8, no bytes)",
+    dependencies=[Depends(version_drift_guard)],
+    responses={
+        202: {"description": "Approve accepted"},
+        400: {"description": "Missing invoice_id / invalid body"},
+        401: {"description": "Authentication failed"},
+        404: {"description": "Invoice not found"},
+        409: {"description": "Version drift / not pending (already actioned)"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+async def approval_approve(request: Request):
+    """
+    Flow 8 (approve) — forward an approval to Core.
+
+    Body: {"invoice_id": <id>, "trace_id": <uuidv7>, "reason": <opt>}
+    Core guards approval_status='PENDING_APPROVAL' (409 already-actioned),
+    flips it to 'APPROVED', and emits ``core.approval.action_confirmed``.
+    """
+    ctx: CallerContext = await authenticate_request(request)
+    trace_state = getattr(request.state, "trace_id", "")
+    body = await _read_json_body(request)
+
+    invoice_id = str(body.get("invoice_id") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    trace_id = str(body.get("trace_id") or "").strip()
+
+    if not invoice_id:
+        raise ValidationFailedError(message="approval/approve requires 'invoice_id'.")
+
+    jwt_token = _user_jwt(request, ctx)
+
+    logger.info(
+        "[%s] POST /api/approval/approve — invoice_id=%s trace_id=%s actor=%s jwt=%s",
+        trace_state,
+        invoice_id,
+        trace_id or "(none)",
+        ctx.actor_type,
+        "yes" if jwt_token else "no",
+    )
+
+    core = request.app.state.core
+    result = await core.approval_approve(
+        invoice_id=invoice_id,
+        trace_id=trace_id,
+        reason=reason,
+        actor_user_id=ctx.identifier if ctx.is_user else "",
+        jwt_token=jwt_token,
+    )
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "call": "approval-approve",
+            "invoice_id": invoice_id,
+            "trace_id": trace_id,
+            "core": result,
+        },
+    )
+
+
+# ── Flow 8 — reject ─────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/api/approval/reject",
+    summary="Reject an invoice's approval (flow 8, no bytes)",
+    dependencies=[Depends(version_drift_guard)],
+    responses={
+        202: {"description": "Reject accepted"},
+        400: {"description": "Missing invoice_id / invalid body"},
+        401: {"description": "Authentication failed"},
+        404: {"description": "Invoice not found"},
+        409: {"description": "Version drift"},
+        422: {"description": "Missing reason"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+async def approval_reject(request: Request):
+    """
+    Flow 8 (reject) — forward an approval rejection to Core.
+
+    Body: {"invoice_id": <id>, "reason": <required>, "trace_id": <uuidv7>}
+    ``reason`` is required (422 from Core if missing — Relay also guards 400
+    early). Core flips approval_status='REJECTED' and emits
+    ``core.approval.action_failed``.
+    """
+    ctx: CallerContext = await authenticate_request(request)
+    trace_state = getattr(request.state, "trace_id", "")
+    body = await _read_json_body(request)
+
+    invoice_id = str(body.get("invoice_id") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    trace_id = str(body.get("trace_id") or "").strip()
+
+    if not invoice_id:
+        raise ValidationFailedError(message="approval/reject requires 'invoice_id'.")
+    if not reason:
+        raise ValidationFailedError(message="approval/reject requires a non-empty 'reason'.")
+
+    jwt_token = _user_jwt(request, ctx)
+
+    logger.info(
+        "[%s] POST /api/approval/reject — invoice_id=%s trace_id=%s actor=%s jwt=%s",
+        trace_state,
+        invoice_id,
+        trace_id or "(none)",
+        ctx.actor_type,
+        "yes" if jwt_token else "no",
+    )
+
+    core = request.app.state.core
+    result = await core.approval_reject(
+        invoice_id=invoice_id,
+        reason=reason,
+        trace_id=trace_id,
+        actor_user_id=ctx.identifier if ctx.is_user else "",
+        jwt_token=jwt_token,
+    )
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "call": "approval-reject",
+            "invoice_id": invoice_id,
+            "trace_id": trace_id,
+            "core": result,
+        },
+    )

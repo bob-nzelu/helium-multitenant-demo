@@ -1256,6 +1256,45 @@ WHERE deleted_at IS NULL;
 
 
 -- ============================================================================
+-- POST-DEPLOY DELTA: APPROVAL (Phase-2 stage 3, flows 7/8)
+-- Ratified by Bob — the CLEAN approval schema (dedicated audit table + state
+-- column), NOT a column-only bridge. Applied additively on top of the LIVE
+-- invoices.invoices table via init_schemas() on every container start. Every
+-- statement is idempotent (ADD COLUMN IF NOT EXISTS / CREATE TABLE IF NOT
+-- EXISTS / CREATE INDEX IF NOT EXISTS) so re-running this file never errors on
+-- the existing deployed table. The lead ALSO runs these ALTERs manually on the
+-- live DB; both paths converge to the same final shape.
+-- ============================================================================
+
+-- State column on the invoice entity row. Approval lifecycle:
+--   NONE -> PENDING_APPROVAL -> (APPROVED | REJECTED)
+ALTER TABLE invoices
+    ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'NONE'
+    CHECK (approval_status IN ('NONE','PENDING_APPROVAL','APPROVED','REJECTED'));
+
+-- Dedicated approval audit ledger. One row per approval action
+-- (requested / approved / rejected). confirmation_status supports the
+-- optimistic->confirmed §B-EventLog pattern (Core writes 'confirmed').
+CREATE TABLE IF NOT EXISTS approval_events (
+    event_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    invoice_id          TEXT NOT NULL,
+    action              TEXT NOT NULL CHECK (action IN ('requested','approved','rejected')),
+    actor_user_id       TEXT NOT NULL,
+    target_actor_id     TEXT,
+    request_type        TEXT,
+    reason              TEXT,
+    trace_id            TEXT,
+    confirmation_status TEXT NOT NULL DEFAULT 'confirmed'
+                            CHECK (confirmation_status IN ('optimistic','confirmed')),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    confirmed_at        TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_events_invoice ON approval_events(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_approval_events_trace   ON approval_events(trace_id);
+
+
+-- ============================================================================
 -- VERSION RECORD
 -- ============================================================================
 

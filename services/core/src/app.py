@@ -42,6 +42,7 @@ from src.api.inventory import router as inventory_router
 from src.api.entities import router as entities_router
 from src.api.search import router as search_router
 from src.api.lifecycle import router as lifecycle_router
+from src.api.approval import router as approval_router
 
 # WS7: Reports & Statistics
 from src.reports.router import router as reports_router
@@ -312,6 +313,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     # accept/reject, flow 9 reversal-via-credit-note). Each UPDATEs/INSERTs
     # the invoices entity row + publishes a Scout-reduced lifecycle SSE.
     app.include_router(lifecycle_router)
+
+    # Phase 2 stage 3: invoice approval handlers (flow 7 request, flow 8
+    # approve/reject). Each UPDATEs invoices.approval_status, INSERTs an
+    # invoices.approval_events audit row, and publishes a Scout-reduced
+    # approval SSE (core.approval.requested / action_confirmed / action_failed).
+    app.include_router(approval_router)
 
     # WS6: Observability (audit, notifications, metrics)
     app.include_router(observability_router)
