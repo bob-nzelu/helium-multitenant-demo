@@ -41,6 +41,7 @@ from src.api.customers import router as customers_router
 from src.api.inventory import router as inventory_router
 from src.api.entities import router as entities_router
 from src.api.search import router as search_router
+from src.api.lifecycle import router as lifecycle_router
 
 # WS7: Reports & Statistics
 from src.reports.router import router as reports_router
@@ -306,6 +307,11 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     app.include_router(inventory_router)
     app.include_router(entities_router)
     app.include_router(search_router)
+
+    # Phase 2: invoice lifecycle handlers (flow 10 payment, flow 6 inbound
+    # accept/reject, flow 9 reversal-via-credit-note). Each UPDATEs/INSERTs
+    # the invoices entity row + publishes a Scout-reduced lifecycle SSE.
+    app.include_router(lifecycle_router)
 
     # WS6: Observability (audit, notifications, metrics)
     app.include_router(observability_router)

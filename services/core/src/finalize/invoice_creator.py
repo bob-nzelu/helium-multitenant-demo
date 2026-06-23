@@ -315,6 +315,141 @@ async def mark_transmitted(
         return None
 
 
+async def get_by_invoice_id(
+    conn: AsyncConnection, invoice_id: str
+) -> dict[str, Any] | None:
+    """Fetch a live (non-deleted) invoice row by its business invoice_id."""
+    if not invoice_id:
+        return None
+    cur = await conn.execute(
+        f"SELECT * FROM {INVOICES_TABLE} WHERE invoice_id = %s AND deleted_at IS NULL LIMIT 1",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    cols = [desc.name for desc in cur.description]
+    return dict(zip(cols, row))
+
+
+async def create_credit_note(
+    conn: AsyncConnection,
+    *,
+    company_id: str | None,
+    invoice_number: str,
+    irn: str,
+    issue_date: str,
+    original_invoice_id: str,
+    total_amount: float = 0.0,
+    tax_amount: float = 0.0,
+    seller_tin: str | None = None,
+    seller_name: str | None = None,
+    buyer_tin: str | None = None,
+    buyer_name: str | None = None,
+    direction: str = "OUTBOUND",
+    currency_code: str = "NGN",
+    blob_uuid: str | None = None,
+    trace_id: str | None = None,
+) -> dict[str, Any] | None:
+    """INSERT a linked CREDIT_NOTE row (flow 9 reversal) already TRANSMITTED.
+
+    document_type='CREDIT_NOTE'. invoice_id/queue_id are derived from the
+    original so a duplicate reversal is idempotent (ON CONFLICT DO NOTHING).
+    The reference link itself is written separately via ``add_reference``.
+    """
+    invoice_id = f"CN-{original_invoice_id}"
+    helium_invoice_no = f"HLX-CN-{invoice_id.replace('-', '')[:20].upper()}"
+    now = _now_iso()
+    try:
+        cur = await conn.execute(
+            f"""
+            INSERT INTO {INVOICES_TABLE} (
+                invoice_id, helium_invoice_no, invoice_number, irn,
+                direction, document_type, transaction_type,
+                issue_date,
+                document_currency_code, tax_currency_code,
+                subtotal, tax_amount, total_amount,
+                workflow_status, transmission_status, payment_status,
+                transmission_date, finalized_at,
+                company_id,
+                queue_id, blob_uuid,
+                seller_tin, seller_name, buyer_tin, buyer_name,
+                source, invoice_trace_id, user_trace_id
+            ) VALUES (
+                %s, %s, %s, %s,
+                %s, 'CREDIT_NOTE', 'B2B',
+                %s,
+                %s, %s,
+                %s, %s, %s,
+                'TRANSMITTED', 'TRANSMITTED', 'UNPAID',
+                %s, %s,
+                %s,
+                %s, %s,
+                %s, %s, %s, %s,
+                'core_reversal', %s, %s
+            )
+            ON CONFLICT (queue_id) DO NOTHING
+            RETURNING *
+            """,
+            (
+                invoice_id, helium_invoice_no, invoice_number, irn,
+                direction,
+                issue_date,
+                currency_code, currency_code,
+                total_amount - tax_amount, tax_amount, total_amount,
+                now, now,
+                company_id,
+                invoice_id, blob_uuid,
+                seller_tin, seller_name, buyer_tin, buyer_name,
+                trace_id, trace_id,
+            ),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return await get_by_invoice_id(conn, invoice_id)
+        cols = [desc.name for desc in cur.description]
+        logger.info("credit_note_created invoice_id=%s original=%s", invoice_id, original_invoice_id)
+        return dict(zip(cols, row))
+    except Exception as exc:
+        logger.warning("create_credit_note_failed original=%s: %s", original_invoice_id, exc)
+        return None
+
+
+async def add_reference(
+    conn: AsyncConnection,
+    *,
+    invoice_pk: int,
+    reference_type: str,
+    reference_invoice_id: str | None = None,
+    reference_irn: str | None = None,
+    reference_issue_date: str | None = None,
+) -> bool:
+    """INSERT an invoices.invoice_references link row.
+
+    ``invoice_pk`` is the integer PK (invoices.id) of the NEW invoice (e.g. the
+    credit note); the FK column ``invoice_references.invoice_id`` is BIGINT ->
+    invoices(id), NOT the business invoice_id text. reference_invoice_id /
+    reference_irn carry the ORIGINAL invoice's business id / irn.
+    """
+    try:
+        await conn.execute(
+            f"""
+            INSERT INTO {REFERENCES_TABLE} (
+                invoice_id, reference_type, reference_invoice_id,
+                reference_irn, reference_issue_date
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                invoice_pk, reference_type, reference_invoice_id,
+                reference_irn, reference_issue_date,
+            ),
+        )
+        return True
+    except Exception as exc:
+        logger.warning("add_reference_failed pk=%s: %s", invoice_pk, exc)
+        return False
+
+
 async def create_inbound_invoice(
     conn: AsyncConnection,
     *,

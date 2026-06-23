@@ -127,6 +127,143 @@ async def _persist_hlx(heartbeat_client, blob_uuid: str, company_id: str | None,
         return None
 
 
+async def run_finalize_pipeline(
+    app_state,
+    *,
+    ref: str,
+    invoice_number: str,
+    issue_date: str,
+    company_id: str | None,
+    service_id: str | None = None,
+    document_id: str | None = None,
+    total_amount: float = 0.0,
+    tax_amount: float = 0.0,
+    direction: str = "OUTBOUND",
+    document_type: str = "COMMERCIAL_INVOICE",
+    transaction_type: str = "B2B",
+    currency_code: str = "NGN",
+    seller_tin: str = "",
+    seller_name: str = "",
+    buyer_tin: str | None = None,
+    buyer_name: str | None = None,
+    line_items: list | None = None,
+    firs_invoice_type_code: str | None = None,
+) -> dict[str, Any]:
+    """Reusable IRN -> QR -> Edge submit -> HLX persist core.
+
+    This is the submit-chain heart shared by POST /api/v1/finalize and the
+    flow-9 reversal handler (which finalizes a freshly-minted CREDIT_NOTE).
+    It does NOT touch the invoice ENTITY row or publish SSE — callers own
+    row linking + lifecycle SSE so each flow can shape its own events.
+
+    Returns a dict with: irn, qr, qr_is_png, firs_confirmation, edge_status,
+    accepted (bool), lifecycle_status, document_id, hlx_blob_ref, service_id,
+    edge_errors (only on failure). Raises IRNError if IRN generation fails.
+    """
+    config_cache = getattr(app_state, "config_cache", None)
+
+    if not service_id and config_cache is not None:
+        try:
+            service_id = (
+                config_cache.get("firs_service_id")
+                or config_cache.get("service_id")
+            )
+        except Exception:
+            service_id = None
+    if not service_id:
+        service_id = "DEMO0001"
+    service_id = str(service_id)[:8].rjust(8, "0")
+
+    clean_number = "".join(c for c in invoice_number if c.isalnum()) or "DOC"
+    if document_id is None:
+        document_id = f"doc-{uuid.uuid4().hex[:16]}"
+
+    # Step 1: IRN (raises IRNError on failure — caller decides 422)
+    irn = generate_irn(clean_number, service_id, issue_date)
+
+    # Step 2: QR (non-fatal fallback)
+    qr_value, qr_is_png = _safe_qr(
+        QRInput(
+            irn=irn,
+            invoice_number=invoice_number,
+            total_amount=total_amount,
+            issue_date=issue_date,
+            seller_tin=seller_tin,
+        )
+    )
+
+    # Step 3: Edge submit (reach STUB_ACCEPTED)
+    edge_client: EdgeClient | None = getattr(app_state, "edge_client", None)
+    firs_confirmation = None
+    edge_status = "NOT_SUBMITTED"
+    edge_errors: list[str] = []
+
+    if edge_client is not None:
+        submission = EdgeSubmission(
+            invoice_id=document_id,
+            irn=irn,
+            invoice_number=invoice_number,
+            issue_date=issue_date,
+            direction=direction,
+            transaction_type=transaction_type,
+            total_amount=total_amount,
+            tax_amount=tax_amount,
+            currency_code=currency_code,
+            seller_tin=seller_tin,
+            seller_name=seller_name or "",
+            buyer_tin=buyer_tin,
+            buyer_name=buyer_name,
+            line_items=line_items or [],
+            qr_code_data=qr_value if qr_is_png else None,
+            firs_invoice_type_code=firs_invoice_type_code,
+        )
+        try:
+            resp = await edge_client._client.post(
+                "/api/v1/submit",
+                json={
+                    "batch_id": ref,
+                    "company_id": company_id or "",
+                    "invoices": [submission.to_dict()],
+                },
+            )
+            resp.raise_for_status()
+            edge_data = resp.json()
+            confs = edge_data.get("confirmations") or []
+            if confs:
+                firs_confirmation = confs[0].get("firs_confirmation")
+                edge_status = confs[0].get("status", edge_data.get("status", "completed"))
+            else:
+                edge_status = edge_data.get("status", "completed")
+        except Exception as exc:
+            edge_status = "EDGE_ERROR"
+            edge_errors.append(str(exc))
+            logger.warning("finalize_pipeline_edge_submit_failed: %s", exc)
+
+    accepted = edge_status in ("STUB_ACCEPTED", "completed", "ACCEPTED")
+    lifecycle_status = "submitted" if accepted else "submission_failed"
+
+    result: dict[str, Any] = {
+        "irn": irn,
+        "qr": qr_value,
+        "qr_is_png": qr_is_png,
+        "firs_confirmation": firs_confirmation,
+        "edge_status": edge_status,
+        "accepted": accepted,
+        "lifecycle_status": lifecycle_status,
+        "document_id": document_id,
+        "service_id": service_id,
+    }
+    if edge_errors:
+        result["edge_errors"] = edge_errors
+
+    # Step 4: Persist HLX result to HeartBeat (doc PERSISTS)
+    heartbeat_client = getattr(app_state, "heartbeat_client", None)
+    result["hlx_blob_ref"] = await _persist_hlx(
+        heartbeat_client, document_id, company_id, result
+    )
+    return result
+
+
 @router.post("/finalize")
 async def finalize_by_reference(request: Request) -> JSONResponse:
     """POST /api/v1/finalize — reference-based finalize (Relay #3 trigger).
@@ -176,33 +313,13 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
         return JSONResponse({"error": "ref is required"}, status_code=400)
 
     # ── Resolve config-driven defaults ────────────────────────────────────
-    config = getattr(request.app.state, "config", None)
-    config_cache = getattr(request.app.state, "config_cache", None)
-
     company_id = body.get("company_id")
-    service_id = body.get("service_id")
-
-    # service_id (8-char FIRS code) from tenant config when not supplied
-    if not service_id and config_cache is not None:
-        try:
-            service_id = (
-                config_cache.get("firs_service_id")
-                or config_cache.get("service_id")
-            )
-        except Exception:
-            service_id = None
-    if not service_id:
-        # Last-resort deterministic 8-char code so IRN generation succeeds in
-        # the demo. Real tenants supply service_id from HeartBeat config.
-        service_id = "DEMO0001"
-    service_id = str(service_id)[:8].rjust(8, "0")
 
     # ── Build a single invoice row (real fields if Relay supplied them) ────
     invoice_number = (body.get("invoice_number") or "").strip()
     if not invoice_number:
         # Derive a stable, alphanumeric invoice number from the ref.
         invoice_number = "".join(c for c in ref if c.isalnum())[:24] or "DOC"
-    clean_number = "".join(c for c in invoice_number if c.isalnum()) or "DOC"
 
     issue_date = (body.get("issue_date") or "").strip()
     if not issue_date:
@@ -216,76 +333,44 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
     # document_id / blob_uuid: stable per-finalize identifier for SSE + persist
     document_id = body.get("document_id") or f"doc-{uuid.uuid4().hex[:16]}"
 
-    # ── Step 1: IRN ───────────────────────────────────────────────────────
+    # ── Steps 1-4: IRN -> QR -> Edge submit -> HLX persist (shared) ───────
     try:
-        irn = generate_irn(clean_number, service_id, issue_date)
-    except IRNError as exc:
-        return JSONResponse(
-            {"error": f"IRN generation failed: {exc}", "ref": ref},
-            status_code=422,
-        )
-
-    # ── Step 2: QR (non-fatal fallback) ───────────────────────────────────
-    qr_value, qr_is_png = _safe_qr(
-        QRInput(
-            irn=irn,
-            invoice_number=invoice_number,
-            total_amount=total_amount,
-            issue_date=issue_date,
-            seller_tin=seller_tin,
-        )
-    )
-
-    # ── Step 3: Edge submit (the goal — reach STUB_ACCEPTED) ──────────────
-    edge_client: EdgeClient | None = getattr(request.app.state, "edge_client", None)
-    firs_confirmation = None
-    edge_status = "NOT_SUBMITTED"
-    edge_errors: list[str] = []
-
-    if edge_client is not None:
-        submission = EdgeSubmission(
-            invoice_id=document_id,
-            irn=irn,
+        pipe = await run_finalize_pipeline(
+            request.app.state,
+            ref=ref,
             invoice_number=invoice_number,
             issue_date=issue_date,
-            direction=direction,
-            transaction_type=body.get("transaction_type", "B2B"),
+            company_id=company_id,
+            service_id=body.get("service_id"),
+            document_id=document_id,
             total_amount=total_amount,
             tax_amount=tax_amount,
+            direction=direction,
+            transaction_type=body.get("transaction_type", "B2B"),
             currency_code=body.get("currency_code", "NGN"),
             seller_tin=seller_tin,
             seller_name=body.get("seller_name", ""),
             buyer_tin=body.get("buyer_tin"),
             buyer_name=body.get("buyer_name"),
             line_items=body.get("line_items", []),
-            qr_code_data=qr_value if qr_is_png else None,
             firs_invoice_type_code=body.get("firs_invoice_type_code"),
         )
-        try:
-            # Use the raw client so we can read Edge's confirmation payload.
-            resp = await edge_client._client.post(
-                "/api/v1/submit",
-                json={
-                    "batch_id": ref,
-                    "company_id": company_id or "",
-                    "invoices": [submission.to_dict()],
-                },
-            )
-            resp.raise_for_status()
-            edge_data = resp.json()
-            confs = edge_data.get("confirmations") or []
-            if confs:
-                firs_confirmation = confs[0].get("firs_confirmation")
-                edge_status = confs[0].get("status", edge_data.get("status", "completed"))
-            else:
-                edge_status = edge_data.get("status", "completed")
-        except Exception as exc:
-            edge_status = "EDGE_ERROR"
-            edge_errors.append(str(exc))
-            logger.warning("lean_finalize_edge_submit_failed: %s", exc)
+    except IRNError as exc:
+        return JSONResponse(
+            {"error": f"IRN generation failed: {exc}", "ref": ref},
+            status_code=422,
+        )
 
-    accepted = edge_status in ("STUB_ACCEPTED", "completed", "ACCEPTED")
-    lifecycle_status = "submitted" if accepted else "submission_failed"
+    irn = pipe["irn"]
+    qr_value = pipe["qr"]
+    qr_is_png = pipe["qr_is_png"]
+    firs_confirmation = pipe["firs_confirmation"]
+    edge_status = pipe["edge_status"]
+    accepted = pipe["accepted"]
+    lifecycle_status = pipe["lifecycle_status"]
+    service_id = pipe["service_id"]
+    edge_errors = pipe.get("edge_errors", [])
+    hlx_blob_ref = pipe["hlx_blob_ref"]
 
     # ── Step 3b: Link finalize to the invoice ENTITY row ──────────────────
     # The doc was (usually) pre-created at ingest as a COMMITTED OUTBOUND row
@@ -355,11 +440,7 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
     if edge_errors:
         result["edge_errors"] = edge_errors
 
-    # ── Step 4: Persist HLX result to HeartBeat (doc PERSISTS) ────────────
-    heartbeat_client = getattr(request.app.state, "heartbeat_client", None)
-    hlx_blob_ref = await _persist_hlx(
-        heartbeat_client, document_id, company_id, result
-    )
+    # HLX result already persisted to HeartBeat inside run_finalize_pipeline.
     result["hlx_blob_ref"] = hlx_blob_ref
 
     # ── Step 5: Emit lifecycle SSE Scout reduces ──────────────────────────
