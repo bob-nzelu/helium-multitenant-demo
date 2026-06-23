@@ -415,6 +415,254 @@ class CoreClient(BaseClient):
 
         return await self.call_with_retries(_finalize_ref)
 
+    # ── Phase-2 invoice lifecycle (flows 10 / 6 / 9) ───────────────────────
+    #
+    # These forward Reader-initiated lifecycle actions to Core's dedicated
+    # Phase-2 handlers (services/core/src/api/lifecycle.py). Each mirrors the
+    # finalize_by_reference plumbing: real httpx POST, trace headers + optional
+    # Bearer JWT for user attribution, non-2xx surfaced (no silent swallow), and
+    # Core's JSON result returned verbatim so the Relay route surfaces Core's
+    # exact shape (the lifecycle event id/family Core emitted on its own SSE).
+
+    async def update_payment_status(
+        self,
+        invoice_id: str,
+        payment_status: str,
+        trace_id: str = "",
+        actor_user_id: str = "",
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 10 — set an invoice's payment_status (Core emits
+        ``core.payment.update_confirmed``).
+
+        Real call: ``POST {core}/api/v1/invoice/{invoice_id}/payment-status``
+            body: {"payment_status": <enum>, "trace_id": <uuidv7>,
+                   "actor_user_id": <optional override>}
+        Core enum-validates ``payment_status`` against
+        UNPAID/PAID/PARTIAL/DISPUTED/CANCELLED (422 on a bad value, 404 if the
+        invoice is absent). Returns Core's result JSON verbatim.
+
+        Args:
+            invoice_id: business invoice id (path param).
+            payment_status: new status (Core validates the enum).
+            trace_id: client UUIDv7; echoed by Core on the SSE.
+            actor_user_id: explicit actor override for demo flows (forwarded).
+            jwt_token: Bearer JWT (forwarded for user attribution).
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx.
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        payload: Dict[str, Any] = {
+            "payment_status": payment_status,
+            "trace_id": trace_id,
+        }
+        if actor_user_id:
+            payload["actor_user_id"] = actor_user_id
+
+        path = f"/api/v1/invoice/{invoice_id}/payment-status"
+
+        async def _update_payment():
+            http = self._get_http()
+            self._calls.append(("update_payment_status", invoice_id, payment_status))
+            try:
+                resp = await http.post(
+                    path,
+                    json=payload,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for payment-status: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "update_payment_status")
+            result = resp.json()
+            logger.info(
+                "Core payment-status — invoice_id=%s status=%s trace_id=%s",
+                invoice_id,
+                payment_status,
+                trace_id or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            result.setdefault("invoice_id", invoice_id)
+            result.setdefault("trace_id", trace_id)
+            return result
+
+        return await self.call_with_retries(_update_payment)
+
+    async def inbound_accept(
+        self,
+        invoice_id: str,
+        trace_id: str = "",
+        reason: str = "",
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 6 (accept) — accept an INBOUND invoice (Core flips
+        inbound_status='ACCEPTED' + inbound_action_* and emits the lifecycle
+        SSE).
+
+        Real call: ``POST {core}/api/v1/inbound/accept``
+            body: {"invoice_id": <id>, "trace_id": <uuidv7>, "reason": <opt>}
+        Core guards direction='INBOUND' AND deleted_at IS NULL; 404 if absent.
+        Returns Core's result JSON verbatim.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx.
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        payload: Dict[str, Any] = {
+            "invoice_id": invoice_id,
+            "trace_id": trace_id,
+        }
+        if reason:
+            payload["reason"] = reason
+
+        async def _accept():
+            http = self._get_http()
+            self._calls.append(("inbound_accept", invoice_id, trace_id))
+            try:
+                resp = await http.post(
+                    "/api/v1/inbound/accept",
+                    json=payload,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for inbound/accept: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "inbound_accept")
+            result = resp.json()
+            logger.info(
+                "Core inbound/accept — invoice_id=%s trace_id=%s",
+                invoice_id,
+                trace_id or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            result.setdefault("invoice_id", invoice_id)
+            result.setdefault("trace_id", trace_id)
+            return result
+
+        return await self.call_with_retries(_accept)
+
+    async def inbound_reject(
+        self,
+        invoice_id: str,
+        reason: str,
+        trace_id: str = "",
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 6 (reject) — reject an INBOUND invoice (Core flips
+        inbound_status='REJECTED' + inbound_action_* and emits the lifecycle
+        SSE). ``reason`` is required by Core (422 if missing).
+
+        Real call: ``POST {core}/api/v1/inbound/reject``
+            body: {"invoice_id": <id>, "reason": <required>, "trace_id": <uuidv7>}
+        Core guards direction='INBOUND' AND deleted_at IS NULL; 404 if absent.
+        Returns Core's result JSON verbatim.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx.
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        payload: Dict[str, Any] = {
+            "invoice_id": invoice_id,
+            "reason": reason,
+            "trace_id": trace_id,
+        }
+
+        async def _reject():
+            http = self._get_http()
+            self._calls.append(("inbound_reject", invoice_id, trace_id))
+            try:
+                resp = await http.post(
+                    "/api/v1/inbound/reject",
+                    json=payload,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for inbound/reject: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "inbound_reject")
+            result = resp.json()
+            logger.info(
+                "Core inbound/reject — invoice_id=%s trace_id=%s",
+                invoice_id,
+                trace_id or "(none)",
+                extra={"trace_id": self.trace_id},
+            )
+            result.setdefault("invoice_id", invoice_id)
+            result.setdefault("trace_id", trace_id)
+            return result
+
+        return await self.call_with_retries(_reject)
+
+    async def reverse(
+        self,
+        invoice_id: str,
+        reversal_kind: str,
+        trace_id: str = "",
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 9 — reverse an invoice via a credit note (Core mints a CREDIT_NOTE
+        row with negated amounts, re-runs the finalize pipeline, flips it to
+        TRANSMITTED + real IRN, and emits core.reversal.pending then
+        core.reversal.transmitted).
+
+        Real call: ``POST {core}/api/v1/reverse``
+            body: {"invoice_id": <orig id>, "reversal_kind": "FULL"|"PARTIAL",
+                   "trace_id": <uuidv7>}
+        Core returns 200 on Edge accept (502 otherwise — surfaced as a Core
+        failure). Returns Core's result JSON verbatim.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx (incl. its
+                502 reversal failure, surfaced as a permanent Core error).
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        payload: Dict[str, Any] = {
+            "invoice_id": invoice_id,
+            "reversal_kind": reversal_kind,
+            "trace_id": trace_id,
+        }
+
+        async def _reverse():
+            http = self._get_http()
+            self._calls.append(("reverse", invoice_id, reversal_kind))
+            try:
+                resp = await http.post(
+                    "/api/v1/reverse",
+                    json=payload,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for reverse: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "reverse")
+            result = resp.json()
+            logger.info(
+                "Core reverse — invoice_id=%s reversal_kind=%s trace_id=%s status=%s",
+                invoice_id,
+                reversal_kind,
+                trace_id or "(none)",
+                result.get("status"),
+                extra={"trace_id": self.trace_id},
+            )
+            result.setdefault("invoice_id", invoice_id)
+            result.setdefault("trace_id", trace_id)
+            return result
+
+        return await self.call_with_retries(_reverse)
+
     async def get_invoice_status(
         self,
         transaction_id: Optional[str] = None,

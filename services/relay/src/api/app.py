@@ -47,6 +47,7 @@ from .routes.artifacts import router as artifacts_router
 from .version_drift import VersionDriftError, version_drift_error_handler
 from .routes.duplicate import router as duplicate_router
 from .routes.finalize import router as finalize_router
+from .routes.lifecycle import router as lifecycle_router
 from .routes.health import router as health_router
 from .routes.ingest import router as ingest_router
 from .routes.internal import router as internal_router
@@ -316,6 +317,7 @@ def create_app(
     app.include_router(metrics_router)
     app.include_router(ingest_router)
     app.include_router(finalize_router)
+    app.include_router(lifecycle_router)
     app.include_router(internal_router)
     app.include_router(duplicate_router)
     app.include_router(artifacts_router)
