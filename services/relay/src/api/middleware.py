@@ -61,8 +61,11 @@ class BodyCacheMiddleware:
             if not body_sent:
                 body_sent = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            # After body is sent, return disconnect
-            return {"type": "http.disconnect"}
+            # Body already replayed. Delegate subsequent receive() calls to the
+            # REAL receive so streaming (SSE) responses detect a genuine client
+            # disconnect instead of us falsely signalling http.disconnect (which
+            # cancels the response task mid-stream).
+            return await receive()
 
         await self.app(scope, cached_receive, send)
 

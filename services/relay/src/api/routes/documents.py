@@ -420,7 +420,7 @@ async def events_stream(request: Request) -> Response:
                             data_lines.append(chunk)
                             continue
                         continue
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — stream end is non-fatal
             logger.info(
                 "[%s] /api/events upstream ended: %s",
                 trace_id, exc,
