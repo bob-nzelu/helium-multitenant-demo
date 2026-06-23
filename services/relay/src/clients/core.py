@@ -40,7 +40,7 @@ from uuid6 import uuid7
 import httpx
 
 from .base import BaseClient
-from ..errors import CoreUnavailableError, TransientError
+from ..errors import CoreUnavailableError, TransientError, RelayError
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +127,13 @@ class CoreClient(BaseClient):
                 message=f"Core {context} returned {resp.status_code}: {resp.text}",
             )
 
-        raise CoreUnavailableError(
-            message=f"Core {context} failed ({resp.status_code}): {resp.text}"
+        # Business 4xx (400/404/409/422) are legitimate Core responses for the
+        # lifecycle/approval gateways (409 already-actioned, 404 absent, 422
+        # bad input) -- propagate Core's ACTUAL status, do not mask as 503.
+        raise RelayError(
+            error_code="CORE_BUSINESS_ERROR",
+            message=f"Core {context} returned {resp.status_code}: {resp.text}",
+            status_code=resp.status_code,
         )
 
     # ── Enqueue (POST /api/v1/enqueue) ─────────────────────────────────────
