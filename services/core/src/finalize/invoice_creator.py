@@ -30,6 +30,7 @@ All SQL uses fully-qualified ``invoices.*`` names (matches invoice_repository)
 and psycopg ``%s`` placeholders. Callers pass an open AsyncConnection.
 """
 
+import os
 from __future__ import annotations
 
 import logging
@@ -64,6 +65,9 @@ def derive_invoice_number(original_filename: str | None, queue_id: str) -> str:
     if "." in stem:
         stem = stem.rsplit(".", 1)[0]
     return _clean_number(stem, queue_id.replace("-", ""))
+
+
+_DEFAULT_COMPANY_ID = os.getenv("CORE_DEFAULT_COMPANY_ID", "sika-nigeria")
 
 
 async def find_by_ref(
@@ -206,6 +210,7 @@ async def create_finalize_invoice(
     are keyed on ``ref`` so a later duplicate finalize is idempotent.
     """
     invoice_id = ref
+    company_id = company_id or _DEFAULT_COMPANY_ID
     helium_invoice_no = f"HLX-{ref.replace('-', '')[:20].upper() or 'DIRECT'}"
     now = _now_iso()
     try:
