@@ -144,18 +144,34 @@ async def test_missing_reference_raises_400(service, core):
     assert core.finalize_calls == []
 
 
-# ── Resilience: Core down must not strand the finalize ───────────────────
+# ── Phase 1: real Core errors surface (no silent swallow) ────────────────
 
 
 class _BrokenCore:
+    def __init__(self):
+        self.calls = 0
+
     async def finalize_by_reference(self, ref, trace_id="", metadata=None, jwt_token=None):
+        self.calls += 1
         raise RuntimeError("core unreachable")
 
 
 @pytest.mark.asyncio
-async def test_core_failure_is_non_fatal():
-    svc = FinalizeService(_BrokenCore())
-    result = await svc.finalize(ref="sha256:resilient", trace_id="t-res")
-    # Still accepted even though the Core forward raised (doc already ingested).
-    assert result.status == "accepted"
-    assert result.trace_id == "t-res"
+async def test_core_failure_propagates():
+    """Phase 1 submit chain: a Core finalize failure is NOT swallowed.
+
+    The pinned submit-chain contract requires real Core errors to surface
+    instead of returning a false 'accepted'. The idempotency record must NOT
+    be written on failure, so the same ref/trace_id can be retried safely.
+    """
+    core = _BrokenCore()
+    svc = FinalizeService(core)
+
+    with pytest.raises(RuntimeError):
+        await svc.finalize(ref="sha256:resilient", trace_id="t-res")
+
+    # No record cached on failure → a retry re-forwards to Core (not deduped
+    # into a stale 409).
+    with pytest.raises(RuntimeError):
+        await svc.finalize(ref="sha256:resilient", trace_id="t-res")
+    assert core.calls == 2

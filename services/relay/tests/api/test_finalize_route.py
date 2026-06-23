@@ -22,8 +22,9 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+import respx
 from asgi_lifespan import LifespanManager
-from httpx import AsyncClient, ASGITransport
+from httpx import AsyncClient, ASGITransport, Response
 
 from src.api.app import create_app
 from src.config import RelayConfig
@@ -33,6 +34,37 @@ from src.services.finalize import FAMILY_FINALIZE_ACCEPTED
 
 TEST_API_KEY = "test-key-001"
 TEST_SECRET = "secret-001"
+
+# CoreClient now makes a REAL httpx call to Core's finalize endpoint
+# (Phase-1 submit chain). The route tests assert Relay's HTTP behaviour
+# (status/shape/echo/dedup), so we mock Core's finalize + enqueue endpoints
+# with respx. Core's default base URL is http://localhost:8080.
+CORE_BASE = "http://localhost:8080"
+
+
+def _mock_core(router: respx.MockRouter) -> None:
+    """Register canned Core responses so Relay's route logic runs end-to-end."""
+    router.post(f"{CORE_BASE}/api/v1/finalize").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "STUB_ACCEPTED",
+                "irn": "IRN-TEST-1",
+                "qr": "data:image/png;base64,xxx",
+            },
+        )
+    )
+    router.post(f"{CORE_BASE}/api/v1/enqueue").mock(
+        return_value=Response(
+            201,
+            json={
+                "queue_id": "q-test-1",
+                "status": "PENDING",
+                "data_uuid": "d-1",
+                "created_at": "2026-06-22T00:00:00Z",
+            },
+        )
+    )
 
 
 @pytest.fixture
@@ -63,10 +95,13 @@ async def client(test_config, test_secrets):
     to swap; Core owns the finalize.accepted event). We assert the route's HTTP
     behaviour only."""
     app = create_app(config=test_config, api_key_secrets=test_secrets)
-    async with LifespanManager(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as c:
-            yield c
+    with respx.mock(assert_all_called=False) as router:
+        router.route(host="test").pass_through()
+        _mock_core(router)
+        async with LifespanManager(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                yield c
 
 
 def _hmac_headers_for_body(body: bytes) -> dict:
@@ -246,15 +281,18 @@ class TestIngestFinalizeAxis:
     ):
         app = create_app(config=test_config, api_key_secrets=test_secrets)
         self._patch_user_introspect(app, monkeypatch)
-        async with LifespanManager(app):
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as c:
-                resp = await c.post(
-                    "/api/ingest",
-                    files={"files": ("inv.pdf", b"%PDF-1.4 finalize-true", "application/pdf")},
-                    data={"call_type": "bulk", "metadata": json.dumps({"finalize": True})},
-                    headers={"Authorization": "Bearer eyJ.eyJ.SIG"},
-                )
+        with respx.mock(assert_all_called=False) as router:
+            router.route(host="test").pass_through()
+            _mock_core(router)
+            async with LifespanManager(app):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as c:
+                    resp = await c.post(
+                        "/api/ingest",
+                        files={"files": ("inv.pdf", b"%PDF-1.4 finalize-true", "application/pdf")},
+                        data={"call_type": "bulk", "metadata": json.dumps({"finalize": True})},
+                        headers={"Authorization": "Bearer eyJ.eyJ.SIG"},
+                    )
         assert resp.status_code == 200, resp.text
         data = resp.json()
         # finalize=true overrode call_type=bulk → external path → irn+qr present.
@@ -269,15 +307,18 @@ class TestIngestFinalizeAxis:
     ):
         app = create_app(config=test_config, api_key_secrets=test_secrets)
         self._patch_user_introspect(app, monkeypatch)
-        async with LifespanManager(app):
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as c:
-                resp = await c.post(
-                    "/api/ingest",
-                    files={"files": ("inv.pdf", b"%PDF-1.4 finalize-false", "application/pdf")},
-                    data={"call_type": "external", "metadata": json.dumps({"finalize": False})},
-                    headers={"Authorization": "Bearer eyJ.eyJ.SIG"},
-                )
+        with respx.mock(assert_all_called=False) as router:
+            router.route(host="test").pass_through()
+            _mock_core(router)
+            async with LifespanManager(app):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as c:
+                    resp = await c.post(
+                        "/api/ingest",
+                        files={"files": ("inv.pdf", b"%PDF-1.4 finalize-false", "application/pdf")},
+                        data={"call_type": "external", "metadata": json.dumps({"finalize": False})},
+                        headers={"Authorization": "Bearer eyJ.eyJ.SIG"},
+                    )
         assert resp.status_code == 200, resp.text
         data = resp.json()
         # finalize=false overrode call_type=external → bulk path. Bulk now

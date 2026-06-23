@@ -281,6 +281,7 @@ def create_app(
         logger.info("Relay-API shutting down")
         await amqp_consumer.stop()
         await heartbeat.close()
+        await core.close()
         await introspect_client.close()
         await redis_client.close()
         await module_cache.cleanup()

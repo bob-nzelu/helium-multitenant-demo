@@ -143,25 +143,18 @@ class FinalizeService:
             return self._on_duplicate(existing, ref=ref, trace_id=trace_id)
 
         # ── Forward the finalize trigger to Core (HTTP, discretionary (c)). ──
-        # Best-effort: Core being down must not strand the finalize — the doc
-        # is already ingested; Core reconciles. We still record the result so the
-        # client's trace_id is dedup-anchored; Core emits the lifecycle event.
-        core_resp: Dict[str, Any] = {}
-        try:
-            core_resp = await self._core.finalize_by_reference(
-                ref=ref or trace_id,
-                trace_id=trace_id,
-                metadata=metadata,
-                jwt_token=jwt_token,
-            )
-        except Exception as exc:  # best-effort downstream trigger
-            logger.warning(
-                "Core finalize_by_reference failed (non-fatal) — "
-                "ref=%s trace_id=%s: %s",
-                (ref or trace_id)[:16],
-                trace_id or "(none)",
-                exc,
-            )
+        # Phase 1: this is the REAL submit chain — Core runs IRN/QR + Edge
+        # submission and emits the lifecycle SSE. We no longer swallow a Core
+        # failure as 'non-fatal': a real Core error (unreachable / 4xx / 5xx)
+        # propagates so the client sees it instead of a false 'accepted'. The
+        # idempotency record is only written AFTER Core accepts, so a failed
+        # finalize can be safely retried with the same ref/trace_id.
+        core_resp: Dict[str, Any] = await self._core.finalize_by_reference(
+            ref=ref or trace_id,
+            trace_id=trace_id,
+            metadata=metadata,
+            jwt_token=jwt_token,
+        )
 
         # Relay is ingress-only (Q24): Core emits the finalize.accepted lifecycle
         # event on its own stream. Relay just records + responds. The event_id

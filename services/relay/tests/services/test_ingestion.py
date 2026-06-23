@@ -46,9 +46,30 @@ def heartbeat():
     return StubHeartBeatClient()
 
 
+class _StubCore(CoreClient):
+    """CoreClient with a healthy-enqueue stub.
+
+    The real CoreClient now makes an httpx call to Core (Phase-1 submit chain);
+    with no Core running it orphan-degrades. These ingestion tests assert the
+    HAPPY-path queue_id, so we stub ``enqueue`` to return what a successful
+    Core enqueue yields (a ``queue_``-prefixed id) without a live Core.
+    """
+
+    async def enqueue(
+        self, blob_uuid, filename, file_size_bytes, batch_id,
+        metadata=None, jwt_token=None,
+    ):
+        return {
+            "queue_id": f"queue_{blob_uuid}",
+            "status": "queued",
+            "batch_id": batch_id,
+            "blob_uuid": blob_uuid,
+        }
+
+
 @pytest.fixture
 def core():
-    return CoreClient()
+    return _StubCore()
 
 
 @pytest.fixture
