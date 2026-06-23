@@ -30,8 +30,8 @@ All SQL uses fully-qualified ``invoices.*`` names (matches invoice_repository)
 and psycopg ``%s`` placeholders. Callers pass an open AsyncConnection.
 """
 
-import os
 from __future__ import annotations
+import os
 
 import logging
 from datetime import date, datetime, timezone
