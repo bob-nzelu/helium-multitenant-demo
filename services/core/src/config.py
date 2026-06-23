@@ -189,6 +189,12 @@ class CoreConfig:
         # ── JWT
         if v := env("JWT_PUBLIC_KEY"):
             kwargs["jwt_public_key"] = v
+        elif v := env("JWT_PUBLIC_KEY_PATH"):
+            try:
+                with open(v, "r") as _kf:
+                    kwargs["jwt_public_key"] = _kf.read()
+            except OSError:
+                pass
         if v := env("JWT_ALGORITHM"):
             kwargs["jwt_algorithm"] = v
 
