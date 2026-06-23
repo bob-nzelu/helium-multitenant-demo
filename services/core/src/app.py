@@ -138,6 +138,14 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         )
         app.state.heartbeat_client = heartbeat_client
 
+        # WS5: Edge FIRS-submission client (real HTTP) for the lean finalize
+        # path. Base URL from CORE_EDGE_URL (e.g. http://edge:8085). Constructed
+        # here (was previously edge_client=None) so POST /api/v1/finalize can
+        # actually reach Edge and get STUB_ACCEPTED.
+        from src.finalize.edge_client import EdgeClient
+        edge_client = EdgeClient(base_url=config.edge_url)
+        app.state.edge_client = edge_client
+
         # Tenant config cache — fetch full config from HeartBeat at startup
         config_cache = TenantConfigCache(heartbeat_client)
         await config_cache.load()  # Non-fatal: falls back to env var defaults
@@ -244,6 +252,10 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
         await entity_listener.stop()
         await queue_scanner.stop()
         await heartbeat_client.close()
+        try:
+            await edge_client.close()
+        except Exception:
+            pass
         if his_feedback_client:
             await his_feedback_client.close()
         if scheduler:
@@ -281,6 +293,12 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(sse_router)
     app.include_router(ingestion_router)
+
+    # WS5: Lean reference-based finalize (POST /api/v1/finalize {ref, trace_id})
+    # — Relay's CoreClient.finalize_by_reference target. IRN + QR + Edge submit
+    # + HeartBeat persist + lifecycle SSE.
+    from src.finalize.lean_router import router as finalize_router
+    app.include_router(finalize_router)
 
     # WS4: Entity CRUD + Search routers
     app.include_router(invoices_router)

@@ -12,6 +12,7 @@ structlog>=24.4.0
 prometheus-client>=0.21.0
 uuid6>=2024.7.10
 httpx>=0.27.0
+qrcode[pil]>=7.4.2
 
 # WS1 — Ingestion parsers
 openpyxl>=3.1.0
