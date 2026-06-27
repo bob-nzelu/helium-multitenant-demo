@@ -372,6 +372,30 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
     edge_errors = pipe.get("edge_errors", [])
     hlx_blob_ref = pipe["hlx_blob_ref"]
 
+    # ── QR persistence payload (jsonb invoices.qr_code_data) ──────────────
+    # Scout's stamper re-renders the QR from ``qr_data`` (the content string it
+    # encodes) and burns the IRN beneath it; carry the pre-rendered PNG too for
+    # any consumer that wants the image directly. ``qr_content`` mirrors the
+    # 5-field FIRS verification payload that qr_generator encodes, so the
+    # re-rendered Scout QR is byte-equivalent in content to the Edge one.
+    qr_content = json.dumps(
+        {
+            "irn": irn,
+            "invoice_number": invoice_number,
+            "total_amount": str(total_amount),
+            "issue_date": issue_date,
+            "seller_tin": seller_tin,
+        },
+        separators=(",", ":"),
+    )
+    qr_code_data_struct: dict[str, Any] = {
+        "format": "png" if qr_is_png else "json",
+        "qr_data": qr_content,
+        "irn": irn,
+    }
+    if qr_is_png:
+        qr_code_data_struct["image_png_base64"] = qr_value
+
     # ── Step 3b: Link finalize to the invoice ENTITY row ──────────────────
     # The doc was (usually) pre-created at ingest as a COMMITTED OUTBOUND row
     # keyed on queue_id == invoice_id (which equals the finalize ``ref``).
@@ -395,6 +419,7 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
                                 irn=irn,
                                 total_amount=total_amount or None,
                                 tax_amount=tax_amount or None,
+                                qr_code_data=qr_code_data_struct,
                             )
                             linked_invoice_id = (updated or existing).get("invoice_id")
                         else:
@@ -415,6 +440,7 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
                                 currency_code=body.get("currency_code", "NGN"),
                                 blob_uuid=document_id,
                                 trace_id=trace_id or None,
+                                qr_code_data=qr_code_data_struct,
                             )
                             if created is not None:
                                 linked_invoice_id = created.get("invoice_id")

@@ -38,6 +38,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from psycopg import AsyncConnection
+from psycopg.types.json import Json
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,7 @@ async def create_finalize_invoice(
     currency_code: str = "NGN",
     blob_uuid: str | None = None,
     trace_id: str | None = None,
+    qr_code_data: Any = None,
 ) -> dict[str, Any] | None:
     """Create-if-absent path for a DIRECT finalize (never ingested).
 
@@ -227,6 +229,7 @@ async def create_finalize_invoice(
                 company_id,
                 queue_id, blob_uuid,
                 seller_tin, seller_name, buyer_tin, buyer_name,
+                qr_code_data,
                 source, invoice_trace_id, user_trace_id
             ) VALUES (
                 %s, %s, %s, %s,
@@ -239,6 +242,7 @@ async def create_finalize_invoice(
                 %s,
                 %s, %s,
                 %s, %s, %s, %s,
+                %s,
                 'core_finalize', %s, %s
             )
             ON CONFLICT (queue_id) DO NOTHING
@@ -254,6 +258,7 @@ async def create_finalize_invoice(
                 company_id,
                 ref, blob_uuid,
                 seller_tin, seller_name, buyer_tin, buyer_name,
+                Json(qr_code_data) if qr_code_data is not None else None,
                 trace_id, trace_id,
             ),
         )
@@ -275,6 +280,7 @@ async def mark_transmitted(
     irn: str,
     total_amount: float | None = None,
     tax_amount: float | None = None,
+    qr_code_data: Any = None,
 ) -> dict[str, Any] | None:
     """Flip an existing (pre-created) invoice row to TRANSMITTED + real IRN.
 
@@ -303,6 +309,10 @@ async def mark_transmitted(
     if tax_amount is not None:
         set_parts.append("tax_amount = %s")
         params.append(tax_amount)
+    if qr_code_data is not None:
+        # qr_code_data column is jsonb — wrap so psycopg sends a proper json type.
+        set_parts.append("qr_code_data = %s")
+        params.append(Json(qr_code_data))
     params.append(invoice_pk)
 
     try:

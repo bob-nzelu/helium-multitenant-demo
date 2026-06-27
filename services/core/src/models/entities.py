@@ -49,6 +49,8 @@ INVOICE_LIST_FIELDS: list[str] = [
     "invoice_id",
     "helium_invoice_no",
     "invoice_number",
+    "irn",
+    "qr_code_data",
     "direction",
     "document_type",
     "transaction_type",

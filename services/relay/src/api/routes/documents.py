@@ -183,6 +183,25 @@ def map_core_invoice_to_document(row: Dict[str, Any]) -> Dict[str, Any]:
         "irn": _str(row.get("irn")),
     }
 
+    # QR payload (jsonb on Core; psycopg returns it as a dict). Carried under
+    # ``invoice.qr`` so Scout's stamper (qr_stamp_payload_from_projection finds a
+    # nested ``qr`` section with ``qr_data``/``irn``) can re-render + burn it in.
+    qr_code_data = row.get("qr_code_data")
+    if isinstance(qr_code_data, str):
+        # Defensive: a text-encoded jsonb round-trips as a string — parse it.
+        try:
+            qr_code_data = json.loads(qr_code_data)
+        except (json.JSONDecodeError, TypeError):
+            qr_code_data = None
+    if isinstance(qr_code_data, dict):
+        invoice["qr"] = qr_code_data
+        # Surface the encodable content + irn at the invoice level too, under the
+        # exact keys the stamper scans first.
+        if qr_code_data.get("qr_data"):
+            invoice["qr_data"] = _str(qr_code_data.get("qr_data"))
+        if qr_code_data.get("irn") and not invoice.get("irn"):
+            invoice["irn"] = _str(qr_code_data.get("irn"))
+
     creator = (
         row.get("created_by")
         or row.get("helium_user_id")
