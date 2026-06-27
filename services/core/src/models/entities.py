@@ -59,6 +59,8 @@ INVOICE_LIST_FIELDS: list[str] = [
     "workflow_status",
     "transmission_status",
     "payment_status",
+    "inbound_status",
+    "approval_status",
     "seller_name",
     "buyer_name",
     "subtotal",
