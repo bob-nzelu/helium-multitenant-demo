@@ -496,6 +496,11 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
         "submission_id": firs_confirmation or "",
         "lifecycle_status": lifecycle_status,
         "irn": irn,
+        # QR content string (FIRS 5-field payload) so Scout's lifecycle reducer can
+        # stamp the REAL stub QR onto the open finalized doc without a my_documents
+        # round-trip (Flow03 QR root-cause part 3). NOT the rendered PNG — Scout
+        # re-renders from this content; keeps the SSE frame small.
+        "qr_data": qr_content,
     }
     if trace_id:
         terminal_data["trace_id"] = trace_id
