@@ -137,6 +137,7 @@ def create_app(config: CoreConfig | None = None) -> FastAPI:
             api_key=config.heartbeat_api_key,
             api_secret=config.heartbeat_api_secret,
             timeout=config.blob_fetch_timeout,
+            signing_key=config.heartbeat_s2s_signing_key,
         )
         app.state.heartbeat_client = heartbeat_client
 

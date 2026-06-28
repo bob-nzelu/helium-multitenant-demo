@@ -202,7 +202,13 @@ services:
       - CORE_DB_POOL_MAX=10
       - CORE_HOST=0.0.0.0
       - CORE_PORT=8080
+      - CORE_JWT_PUBLIC_KEY_PATH=/app/jwt_public.pem
       - CORE_HEARTBEAT_URL=http://heartbeat:9000
+      # HeartBeat s2s is HMAC-only (Bearer removed). Core signs the config
+      # fetch with its registered api_key + the per-service signing key from
+      # registry.service_config (HMAC_S2S_MIGRATION_SPEC).
+      - CORE_HEARTBEAT_API_KEY=${CORE_HEARTBEAT_API_KEY:-cr_test_core001}
+      - CORE_HEARTBEAT_S2S_SIGNING_KEY=${CORE_HEARTBEAT_S2S_SIGNING_KEY:-}
       - CORE_EDGE_URL=http://edge:8085
       - CORE_HIS_BASE_URL=http://his:8500
       - CORE_HIS_FEEDBACK_ENABLED=false
@@ -211,6 +217,8 @@ services:
       - CORE_RABBITMQ_URL=amqp://${RABBITMQ_USER:-helium}:${RABBITMQ_PASSWORD:-helium_mq_2026}@rabbitmq:5672/
       - CORE_CORE_QUEUE=core_queue
       - CORE_EDGE_QUEUE=edge_queue
+    volumes:
+      - ./config/jwt_public.pem:/app/jwt_public.pem:ro
     depends_on:
       postgres:
         condition: service_healthy

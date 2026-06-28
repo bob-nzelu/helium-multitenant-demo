@@ -47,6 +47,9 @@ class CoreConfig:
     heartbeat_url: str = "http://localhost:9000"
     heartbeat_api_key: str = ""
     heartbeat_api_secret: str = ""
+    # HMAC s2s signing key (CORE_HEARTBEAT_S2S_SIGNING_KEY) — HeartBeat removed
+    # Bearer s2s; the config fetch is HMAC-signed (HMAC_S2S_MIGRATION_SPEC).
+    heartbeat_s2s_signing_key: str = ""
     edge_url: str = "http://localhost:8090"
 
     # ── Ingestion (WS1) ───────────────────────────────────────────────────
@@ -165,6 +168,8 @@ class CoreConfig:
             kwargs["heartbeat_api_key"] = v
         if v := env("HEARTBEAT_API_SECRET"):
             kwargs["heartbeat_api_secret"] = v
+        if v := env("HEARTBEAT_S2S_SIGNING_KEY"):
+            kwargs["heartbeat_s2s_signing_key"] = v
         if v := env("EDGE_URL"):
             kwargs["edge_url"] = v
 

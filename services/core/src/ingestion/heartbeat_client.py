@@ -14,6 +14,7 @@ import structlog
 
 from src.errors import ExternalServiceError, NotFoundError, TimeoutError
 from src.ingestion.models import BlobResponse
+from src.ingestion._s2s_hmac import build_s2s_hmac_headers
 
 logger = structlog.get_logger()
 
@@ -31,6 +32,7 @@ class HeartBeatBlobClient:
         api_key: str = "",
         api_secret: str = "",
         timeout: float = 30.0,
+        signing_key: str = "",
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url,
@@ -39,6 +41,11 @@ class HeartBeatBlobClient:
         )
         self._api_key = api_key
         self._api_secret = api_secret
+        # Per-service HMAC s2s signing key (CORE_HEARTBEAT_S2S_SIGNING_KEY).
+        # HeartBeat removed Bearer api_key:api_secret s2s — config fetch is
+        # HMAC-signed (HMAC_S2S_MIGRATION_SPEC). Empty => the legacy Bearer
+        # paths still run (and will 401 against the migrated HB).
+        self._signing_key = signing_key
 
     def _auth_headers(self) -> dict[str, str]:
         """Build the Authorization header for HeartBeat service auth.
@@ -210,14 +217,27 @@ class HeartBeatBlobClient:
         Retries 3x with exponential backoff on 5xx.
         Raises ExternalServiceError on final failure.
         """
-        headers: dict[str, str] = self._auth_headers()
-
+        _CONFIG_PATH = "/api/v1/heartbeat/config"
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             try:
+                # HeartBeat s2s is HMAC-only (Bearer removed). Sign POST + path
+                # + empty body with the core service signing key. Build fresh
+                # headers per attempt — HB dedups the X-Nonce, so a retry must
+                # use a new nonce/timestamp.
+                headers = dict(
+                    build_s2s_hmac_headers(
+                        method="POST",
+                        path=_CONFIG_PATH,
+                        body_bytes=b"",
+                        api_key=self._api_key,
+                        signing_key=self._signing_key,
+                    )
+                )
                 resp = await self._client.post(
-                    "/api/v1/heartbeat/config",
+                    _CONFIG_PATH,
                     headers=headers,
+                    content=b"",
                 )
 
                 if resp.status_code == 200:
