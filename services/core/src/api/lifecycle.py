@@ -47,8 +47,10 @@ from fastapi.responses import JSONResponse
 
 from src.database.pool import get_connection
 from src.finalize.invoice_creator import (
+    _DEFAULT_COMPANY_ID,
     add_reference,
     create_credit_note,
+    create_inbound_invoice,
     get_by_invoice_id,
 )
 from src.finalize.irn_generator import IRNError
@@ -65,6 +67,7 @@ VALID_PAYMENT_STATUSES = {"UNPAID", "PAID", "PARTIAL", "DISPUTED", "CANCELLED"}
 
 # Scout-reduced lifecycle event names (wire-pinned, like lean_router).
 EVENT_PAYMENT_UPDATE_CONFIRMED = "core.payment.update_confirmed"
+EVENT_INBOUND_RECEIVED = "core.inbound.received"
 EVENT_INBOUND_ACCEPT_CONFIRMED = "core.inbound.accept_confirmed"
 EVENT_INBOUND_REJECTED = "core.inbound.rejected"
 EVENT_REVERSAL_PENDING = "core.reversal.pending"
@@ -339,6 +342,105 @@ async def inbound_reject(request: Request) -> JSONResponse:
         new_status="REJECTED",
         event_type=EVENT_INBOUND_REJECTED,
         require_reason=True,
+    )
+
+
+@router.post("/inbound/arrival")
+async def inbound_arrival(request: Request) -> JSONResponse:
+    """Flow 11 — an INBOUND invoice ARRIVED for the tenant (receive/seed).
+
+    Creates a direction='INBOUND', inbound_status='PENDING_REVIEW' row the tenant
+    then accepts/rejects (the accept/reject handlers above act on it), and emits
+    ``core.inbound.received`` so the entitled actors' Scout replicators re-read
+    /api/my_documents and surface it on the Inbound tab. In production this is
+    fired by the cross-tenant route when a supplier transmits to this tenant; on
+    the demo it is the seed surface. company_id defaults the SAME way finalize
+    does (None -> CORE_DEFAULT_COMPANY_ID) so the row scopes to the same slice.
+
+    Body: {invoice_id?, invoice_number?, irn?, seller_name?, seller_tin?,
+           buyer_name?, buyer_tin?, total_amount?, tax_amount?, company_id?,
+           currency_code?, trace_id?}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    company_id = body.get("company_id")
+    trace_id = body.get("trace_id")
+    actor_user_id, _ = _actor(request, body)
+
+    pool = request.app.state.pool
+    sse_manager = getattr(request.app.state, "sse_manager", None)
+    audit_logger = getattr(request.app.state, "audit_logger", None)
+
+    inbound_payload = body.get("inbound_payload")
+    async with get_connection(pool, "invoices") as conn:
+        async with conn.transaction():
+            row = await create_inbound_invoice(
+                conn,
+                company_id=(str(company_id).strip() if company_id else _DEFAULT_COMPANY_ID),
+                invoice_number=str(
+                    body.get("invoice_number") or body.get("invoice_id") or "INBOUND"
+                ).strip(),
+                irn=body.get("irn"),
+                total_amount=float(body.get("total_amount") or 0),
+                tax_amount=float(body.get("tax_amount") or 0),
+                seller_tin=body.get("seller_tin"),
+                seller_name=body.get("seller_name"),
+                buyer_tin=body.get("buyer_tin"),
+                buyer_name=body.get("buyer_name"),
+                currency_code=body.get("currency_code", "NGN"),
+                inbound_payload=inbound_payload if isinstance(inbound_payload, dict) else None,
+                trace_id=trace_id,
+            )
+
+    if row is None:
+        return JSONResponse(
+            {"error": "failed to create inbound invoice"}, status_code=500
+        )
+
+    invoice_id = row.get("invoice_id")
+    resolved_company = row.get("company_id") or company_id
+
+    if audit_logger:
+        await audit_logger.log(
+            event_type="invoice.inbound_received",
+            entity_type="invoice",
+            entity_id=invoice_id,
+            action="CREATE",
+            company_id=resolved_company,
+            actor_id=actor_user_id,
+            metadata={"inbound_status": row.get("inbound_status"), "trace_id": trace_id},
+        )
+
+    data: dict[str, Any] = {
+        "document_id": invoice_id,
+        "invoice_id": invoice_id,
+        "inbound_status": row.get("inbound_status"),
+        "direction": "INBOUND",
+        "company_id": resolved_company,
+    }
+    if trace_id:
+        data["trace_id"] = trace_id
+    await _emit(
+        sse_manager,
+        SSEEvent(
+            event_type=EVENT_INBOUND_RECEIVED,
+            data=data,
+            data_uuid=invoice_id,
+            company_id=resolved_company,
+            timestamp=_now_iso(),
+        ),
+    )
+
+    return JSONResponse(
+        {
+            "invoice_id": invoice_id,
+            "inbound_status": row.get("inbound_status"),
+            "trace_id": trace_id,
+        },
+        status_code=200,
     )
 
 

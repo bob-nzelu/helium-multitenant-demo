@@ -553,6 +553,53 @@ class CoreClient(BaseClient):
 
         return await self.call_with_retries(_accept)
 
+    async def inbound_arrival(
+        self,
+        payload: Dict[str, Any],
+        jwt_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flow 11 — receive/seed an INBOUND invoice for the tenant.
+
+        Real call: ``POST {core}/api/v1/inbound/arrival`` with the inbound facts
+        (optional invoice_id, seller/buyer, amounts). Core INSERTs a
+        direction='INBOUND', inbound_status='PENDING_REVIEW' row and emits
+        ``core.inbound.received``. Returns Core's result JSON verbatim.
+
+        Raises:
+            CoreUnavailableError: Core unreachable or returns a 4xx.
+            TransientError: Core returns 5xx (retried by call_with_retries).
+        """
+        body: Dict[str, Any] = dict(payload or {})
+
+        async def _arrival():
+            http = self._get_http()
+            self._calls.append(
+                ("inbound_arrival", str(body.get("invoice_id") or ""),
+                 str(body.get("trace_id") or ""))
+            )
+            try:
+                resp = await http.post(
+                    "/api/v1/inbound/arrival",
+                    json=body,
+                    headers=self._headers(jwt_token),
+                )
+            except httpx.ConnectError as e:
+                raise CoreUnavailableError(
+                    message=f"Cannot connect to Core for inbound/arrival: {e}"
+                ) from e
+
+            self._raise_for_status(resp, "inbound_arrival")
+            result = resp.json()
+            logger.info(
+                "Core inbound/arrival — invoice_id=%s",
+                result.get("invoice_id"),
+                extra={"trace_id": self.trace_id},
+            )
+            return result
+
+        return await self.call_with_retries(_arrival)
+
     async def inbound_reject(
         self,
         invoice_id: str,

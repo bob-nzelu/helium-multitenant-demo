@@ -298,6 +298,58 @@ async def inbound_reject(request: Request):
     )
 
 
+# ── Flow 11 — inbound arrival (receive/seed) ────────────────────────────────
+
+
+@router.post(
+    "/api/inbound_arrival",
+    summary="Receive/seed an inbound invoice for the tenant (flow 11)",
+    responses={
+        200: {"description": "Inbound invoice created"},
+        400: {"description": "Invalid JSON body"},
+        401: {"description": "Authentication failed"},
+    },
+)
+async def inbound_arrival(request: Request):
+    """
+    Flow 11 — an INBOUND invoice ARRIVED for the tenant.
+
+    Forwards the inbound facts to Core, which INSERTs a direction='INBOUND',
+    inbound_status='PENDING_REVIEW' row and emits ``core.inbound.received`` so the
+    entitled actors' Reader Inbound tab surfaces it (accept/reject then act on
+    it). In production this is the cross-tenant transmit landing; on the demo it
+    seeds an inbound doc. ``invoice_id`` optional (Core mints one if absent).
+    Matches the path the Reader client's ``report_inbound_arrival`` already posts.
+    """
+    ctx: CallerContext = await authenticate_request(request)
+    trace_state = getattr(request.state, "trace_id", "")
+    body = await _read_json_body(request)
+
+    jwt_token = _user_jwt(request, ctx)
+    logger.info(
+        "[%s] POST /api/inbound_arrival — invoice_id=%s actor=%s jwt=%s",
+        trace_state,
+        body.get("invoice_id") or "(mint)",
+        ctx.actor_type,
+        "yes" if jwt_token else "no",
+    )
+
+    core = request.app.state.core
+    result = await core.inbound_arrival(payload=body, jwt_token=jwt_token)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "accepted",
+            "call": "inbound-arrival",
+            "invoice_id": result.get("invoice_id"),
+            "inbound_status": result.get("inbound_status"),
+            "trace_id": body.get("trace_id"),
+            "core": result,
+        },
+    )
+
+
 # ── Flow 9 — reverse (credit note) ──────────────────────────────────────────
 
 
