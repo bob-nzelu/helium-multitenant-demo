@@ -420,6 +420,9 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
                                 total_amount=total_amount or None,
                                 tax_amount=tax_amount or None,
                                 qr_code_data=qr_code_data_struct,
+                                # Backfill the original-PDF blob ref if the
+                                # pre-created row lacked one (Flow 04 byte-fetch).
+                                blob_uuid=ref or None,
                             )
                             linked_invoice_id = (updated or existing).get("invoice_id")
                         else:
@@ -438,7 +441,12 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
                                 buyer_name=body.get("buyer_name"),
                                 direction=direction,
                                 currency_code=body.get("currency_code", "NGN"),
-                                blob_uuid=document_id,
+                                # ``ref`` is the ORIGINAL-PDF blob_uuid threaded
+                                # from ingest (Relay returns doc_ref=blob_uuid).
+                                # Storing it as the invoice's blob_uuid is what
+                                # makes original_pdf_ref resolve for byte-fetch
+                                # (Flow 04). HLX still persists under document_id.
+                                blob_uuid=ref,
                                 trace_id=trace_id or None,
                                 qr_code_data=qr_code_data_struct,
                             )

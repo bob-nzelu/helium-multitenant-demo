@@ -260,6 +260,7 @@ async def ingest(
             file_hash=result.ingest.file_hash,
             file_uuids=result.ingest.blob_uuids,
             file_hashes=result.ingest.file_hashes,
+            doc_ref=(result.ingest.blob_uuids[0] if result.ingest.blob_uuids else ""),
             trace_id=trace_id,
             irn=result.irn,
             qr_code=result.qr_code,
@@ -286,5 +287,6 @@ async def ingest(
             file_hash=result.ingest.file_hash,
             file_uuids=result.ingest.blob_uuids,
             file_hashes=result.ingest.file_hashes,
+            doc_ref=(result.ingest.blob_uuids[0] if result.ingest.blob_uuids else ""),
             trace_id=trace_id,
         )

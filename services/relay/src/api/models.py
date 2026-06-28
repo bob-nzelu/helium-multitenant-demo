@@ -169,6 +169,13 @@ class IngestResponse(BaseModel):
     file_uuids: List[str] = Field(
         description="Per-file storage identifiers (one per uploaded file)",
     )
+    # doc_ref = the primary file's storage blob_uuid. The Reader threads this as
+    # the finalize ``ref`` (scout backend_doc_ref), so the finalized invoice gets
+    # blob_uuid==ref==this, exposing the ORIGINAL PDF for byte-fetch (Flow 04).
+    doc_ref: str = Field(
+        default="",
+        description="Primary file storage ref (blob_uuid) — threaded to finalize",
+    )
     file_hashes: Optional[List[str]] = Field(
         default=None,
         description="Per-file SHA256 hashes (one per uploaded file)",

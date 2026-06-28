@@ -51,6 +51,10 @@ INVOICE_LIST_FIELDS: list[str] = [
     "invoice_number",
     "irn",
     "qr_code_data",
+    # blob_uuid is the HB storage key for the ORIGINAL source PDF (written at
+    # ingest). The Reader read-side maps it to ``original_pdf_ref`` so a cloud-only
+    # doc can byte-fetch its original via POST /api/blobs/fetch (Flow 04).
+    "blob_uuid",
     "direction",
     "document_type",
     "transaction_type",

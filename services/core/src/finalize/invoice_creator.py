@@ -281,6 +281,7 @@ async def mark_transmitted(
     total_amount: float | None = None,
     tax_amount: float | None = None,
     qr_code_data: Any = None,
+    blob_uuid: str | None = None,
 ) -> dict[str, Any] | None:
     """Flip an existing (pre-created) invoice row to TRANSMITTED + real IRN.
 
@@ -313,6 +314,11 @@ async def mark_transmitted(
         # qr_code_data column is jsonb — wrap so psycopg sends a proper json type.
         set_parts.append("qr_code_data = %s")
         params.append(Json(qr_code_data))
+    if blob_uuid:
+        # Backfill the ORIGINAL-PDF blob ref ONLY if the (pre-created) row had
+        # none, so a real ingest-created blob_uuid is never clobbered (Flow 04).
+        set_parts.append("blob_uuid = COALESCE(NULLIF(blob_uuid, ''), %s)")
+        params.append(blob_uuid)
     params.append(invoice_pk)
 
     try:
