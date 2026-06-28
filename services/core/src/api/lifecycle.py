@@ -56,6 +56,21 @@ from src.finalize.invoice_creator import (
 from src.finalize.irn_generator import IRNError
 from src.finalize.lean_router import run_finalize_pipeline
 from src.sse.models import SSEEvent
+from src.auth.tai_enforcement import (
+    bearer_claims,
+    check_can_reverse,
+    check_has_permission,
+    creator_email,
+    load_tai_config,
+    resolve_actor,
+)
+
+
+def _claim_role(request, body: dict[str, Any]) -> str:
+    """Actor role from the forwarded JWT (body 'actor_role' override for tests)."""
+    return str(
+        (body or {}).get("actor_role") or bearer_claims(request).get("role") or ""
+    ).strip()
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +151,19 @@ async def update_payment_status(request: Request, invoice_id: str) -> JSONRespon
                 "allowed": sorted(VALID_PAYMENT_STATUSES),
             },
             status_code=422,
+        )
+
+    # TAI gate: only an actor with the update_payment permission (Owner baseline)
+    # may change payment status.
+    _ok, _why = check_has_permission(
+        load_tai_config(request.app.state),
+        actor_role=_claim_role(request, body),
+        perm="update_payment",
+    )
+    if not _ok:
+        return JSONResponse(
+            {"error": "not entitled to update payment", "reason": _why},
+            status_code=403,
         )
 
     actor_user_id, _ = _actor(request, body)
@@ -230,6 +258,19 @@ async def _inbound_action(
         return JSONResponse(
             {"error": "reason is required to reject an inbound invoice"},
             status_code=422,
+        )
+
+    # TAI gate: only an actor with accept_inbound permission may accept/reject
+    # an inbound invoice (Owner baseline; Admin/Operator lack it by default).
+    _ok, _why = check_has_permission(
+        load_tai_config(request.app.state),
+        actor_role=_claim_role(request, body),
+        perm="accept_inbound",
+    )
+    if not _ok:
+        return JSONResponse(
+            {"error": "not entitled to action inbound invoice", "reason": _why},
+            status_code=403,
         )
 
     trace_id = body.get("trace_id")
@@ -490,6 +531,23 @@ async def reverse_invoice(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": f"invoice {original_invoice_id} not found"},
             status_code=404,
+        )
+
+    # TAI gate: only a reversal creator (the original invoice creator, or a
+    # perm:reverser = Owner/Admin baseline) may initiate a reversal.
+    _tai = load_tai_config(request.app.state)
+    async with get_connection(pool, "invoices") as _gconn:
+        _uid, _email, _role = await resolve_actor(_gconn, request, body)
+        _orig_creator = await creator_email(_gconn, original)
+    _ok, _why = check_can_reverse(
+        _tai, actor_email=_email, actor_role=_role,
+        original_creator_email=_orig_creator,
+    )
+    if not _ok:
+        return JSONResponse(
+            {"error": "not entitled to reverse", "reason": _why,
+             "invoice_id": original_invoice_id},
+            status_code=403,
         )
 
     company_id = original.get("company_id")

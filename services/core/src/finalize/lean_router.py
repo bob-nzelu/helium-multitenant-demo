@@ -315,6 +315,19 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
     # ── Resolve config-driven defaults ────────────────────────────────────
     company_id = body.get("company_id")
 
+    # Submitting actor → created_by, so the TAI no-self-approval rule can detect
+    # a creator approving their own invoice. Relay forwards the user JWT on the
+    # finalize hop; decode it directly (middleware doesn't reliably expose claims
+    # on this route) via the shared tai_enforcement.bearer_claims.
+    try:
+        from src.auth.tai_enforcement import bearer_claims as _bc
+        _fin_claims = _bc(request)
+    except Exception:
+        _fin_claims = {}
+    finalize_actor = str(
+        _fin_claims.get("sub") or body.get("actor_user_id") or ""
+    ).strip() or None
+
     # ── Build a single invoice row (real fields if Relay supplied them) ────
     invoice_number = (body.get("invoice_number") or "").strip()
     if not invoice_number:
@@ -449,6 +462,7 @@ async def finalize_by_reference(request: Request) -> JSONResponse:
                                 blob_uuid=ref,
                                 trace_id=trace_id or None,
                                 qr_code_data=qr_code_data_struct,
+                                created_by=finalize_actor,
                             )
                             if created is not None:
                                 linked_invoice_id = created.get("invoice_id")

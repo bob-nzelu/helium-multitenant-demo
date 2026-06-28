@@ -204,12 +204,15 @@ async def create_finalize_invoice(
     blob_uuid: str | None = None,
     trace_id: str | None = None,
     qr_code_data: Any = None,
+    created_by: str | None = None,
 ) -> dict[str, Any] | None:
     """Create-if-absent path for a DIRECT finalize (never ingested).
 
     Inserts an already-TRANSMITTED row carrying the real IRN. Used by
     lean_router only when ``find_by_ref`` returns None. invoice_id/queue_id
     are keyed on ``ref`` so a later duplicate finalize is idempotent.
+    ``created_by`` is the submitting actor (user_id) — stamped so the TAI
+    no-self-approval rule can detect a creator approving their own invoice.
     """
     invoice_id = ref
     company_id = company_id or _DEFAULT_COMPANY_ID
@@ -230,6 +233,7 @@ async def create_finalize_invoice(
                 queue_id, blob_uuid,
                 seller_tin, seller_name, buyer_tin, buyer_name,
                 qr_code_data,
+                created_by, helium_user_id,
                 source, invoice_trace_id, user_trace_id
             ) VALUES (
                 %s, %s, %s, %s,
@@ -243,6 +247,7 @@ async def create_finalize_invoice(
                 %s, %s,
                 %s, %s, %s, %s,
                 %s,
+                %s, %s,
                 'core_finalize', %s, %s
             )
             ON CONFLICT (queue_id) DO NOTHING
@@ -259,6 +264,7 @@ async def create_finalize_invoice(
                 ref, blob_uuid,
                 seller_tin, seller_name, buyer_tin, buyer_name,
                 Json(qr_code_data) if qr_code_data is not None else None,
+                created_by, created_by,
                 trace_id, trace_id,
             ),
         )

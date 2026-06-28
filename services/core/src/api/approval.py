@@ -50,6 +50,13 @@ from fastapi.responses import JSONResponse
 from src.database.pool import get_connection
 from src.finalize.invoice_creator import get_by_invoice_id
 from src.sse.models import SSEEvent
+from src.auth.tai_enforcement import (
+    check_can_approve,
+    check_can_request,
+    creator_email,
+    load_tai_config,
+    resolve_actor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +135,62 @@ async def _record_event(
     return str(row[0]) if row is not None else None
 
 
+async def _approval_gate(
+    request: Request, body: dict[str, Any], invoice_id: str, *, action: str
+) -> JSONResponse | None:
+    """TAI eligibility gate (segregation of duties). Returns a 403/404 JSONResponse
+    to ABORT, or None to proceed. ``action`` ∈ {'request','approve','reject'}.
+
+    - request: caller must be a submission CREATOR (role:Owner/Admin or perm:creator).
+    - approve/reject: caller must be a designated stage approver AND not the
+      creator self-approving (per the TAI submission policy).
+    Enforced server-side because the JWT-trust model let any tenant member act
+    (proven gap 2026-06-28). The actor's email is resolved from auth.users (the
+    JWT has no email; Sika TAI approvers are email: identities)."""
+    tai_config = load_tai_config(request.app.state)
+    pool = request.app.state.pool
+    async with get_connection(pool, "invoices") as conn:
+        existing = await get_by_invoice_id(conn, invoice_id)
+        if existing is None:
+            return JSONResponse(
+                {"error": f"invoice {invoice_id} not found"}, status_code=404
+            )
+        actor_uid, actor_email, actor_role = await resolve_actor(conn, request, body)
+        if action == "request":
+            allowed, reason = check_can_request(
+                tai_config, actor_email=actor_email, actor_role=actor_role
+            )
+        else:
+            c_email = await creator_email(conn, existing)
+            is_creator = bool(
+                (actor_uid and actor_uid == str(existing.get("created_by") or ""))
+                or (actor_email and c_email and actor_email.lower() == c_email.lower())
+            )
+            allowed, reason = check_can_approve(
+                tai_config,
+                actor_email=actor_email,
+                actor_role=actor_role,
+                surface="submission",
+                current_stage=0,
+                creator_email=c_email,
+                is_creator=is_creator,
+            )
+    if not allowed:
+        logger.info(
+            "approval_gate DENIED action=%s invoice=%s actor=%s role=%s reason=%s",
+            action, invoice_id, actor_email or "(unknown)", actor_role or "(none)", reason,
+        )
+        return JSONResponse(
+            {
+                "error": f"not entitled to {action} this invoice",
+                "reason": reason,
+                "invoice_id": invoice_id,
+            },
+            status_code=403,
+        )
+    return None
+
+
 # ── FLOW 7: request approval ───────────────────────────────────────────────
 
 
@@ -149,6 +212,10 @@ async def request_approval(request: Request) -> JSONResponse:
     invoice_id = (body.get("invoice_id") or "").strip()
     if not invoice_id:
         return JSONResponse({"error": "invoice_id is required"}, status_code=400)
+
+    gate = await _approval_gate(request, body, invoice_id, action="request")
+    if gate is not None:
+        return gate
 
     target_actor_id = body.get("target_actor_id")
     request_type = body.get("request_type")
@@ -259,6 +326,10 @@ async def approve(request: Request) -> JSONResponse:
     invoice_id = (body.get("invoice_id") or "").strip()
     if not invoice_id:
         return JSONResponse({"error": "invoice_id is required"}, status_code=400)
+
+    gate = await _approval_gate(request, body, invoice_id, action="approve")
+    if gate is not None:
+        return gate
 
     reason = body.get("reason")
     trace_id = body.get("trace_id")
@@ -378,6 +449,10 @@ async def reject(request: Request) -> JSONResponse:
     invoice_id = (body.get("invoice_id") or "").strip()
     if not invoice_id:
         return JSONResponse({"error": "invoice_id is required"}, status_code=400)
+
+    gate = await _approval_gate(request, body, invoice_id, action="reject")
+    if gate is not None:
+        return gate
 
     reason = body.get("reason")
     if not (reason and str(reason).strip()):
