@@ -63,6 +63,7 @@ from src.auth.tai_enforcement import (
     creator_email,
     load_tai_config,
     resolve_actor,
+    user_perms_for,
 )
 
 
@@ -153,12 +154,16 @@ async def update_payment_status(request: Request, invoice_id: str) -> JSONRespon
             status_code=422,
         )
 
-    # TAI gate: only an actor with the update_payment permission (Owner baseline)
-    # may change payment status.
+    # TAI gate: only an actor whose effective perms include update_payment
+    # (Owner baseline; or per-user grant — bola/tunde). Resolve email to read
+    # the per-user grants, since the Operator role baseline is [] per canon.
+    _tai = load_tai_config(request.app.state)
+    async with get_connection(request.app.state.pool, "invoices") as _gc:
+        _uid, _email, _role = await resolve_actor(_gc, request, body)
+    _xp, _xx = user_perms_for(request.app.state, _email)
     _ok, _why = check_has_permission(
-        load_tai_config(request.app.state),
-        actor_role=_claim_role(request, body),
-        perm="update_payment",
+        _tai, actor_role=_role, perm="update_payment",
+        extra_perms=_xp, excluded_perms=_xx,
     )
     if not _ok:
         return JSONResponse(
@@ -260,12 +265,16 @@ async def _inbound_action(
             status_code=422,
         )
 
-    # TAI gate: only an actor with accept_inbound permission may accept/reject
-    # an inbound invoice (Owner baseline; Admin/Operator lack it by default).
+    # TAI gate: only an actor whose effective perms include accept_inbound may
+    # accept/reject an inbound invoice (Owner baseline; or per-user grant —
+    # francisca). Resolve email for the per-user grants (Operator baseline []).
+    _tai = load_tai_config(request.app.state)
+    async with get_connection(request.app.state.pool, "invoices") as _gc:
+        _uid, _email, _role = await resolve_actor(_gc, request, body)
+    _xp, _xx = user_perms_for(request.app.state, _email)
     _ok, _why = check_has_permission(
-        load_tai_config(request.app.state),
-        actor_role=_claim_role(request, body),
-        perm="accept_inbound",
+        _tai, actor_role=_role, perm="accept_inbound",
+        extra_perms=_xp, excluded_perms=_xx,
     )
     if not _ok:
         return JSONResponse(
@@ -539,8 +548,10 @@ async def reverse_invoice(request: Request) -> JSONResponse:
     async with get_connection(pool, "invoices") as _gconn:
         _uid, _email, _role = await resolve_actor(_gconn, request, body)
         _orig_creator = await creator_email(_gconn, original)
+    _xp, _xx = user_perms_for(request.app.state, _email)
     _ok, _why = check_can_reverse(
         _tai, actor_email=_email, actor_role=_role,
+        extra_perms=_xp, excluded_perms=_xx,
         original_creator_email=_orig_creator,
     )
     if not _ok:

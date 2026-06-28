@@ -65,7 +65,7 @@ def bearer_claims(request) -> dict[str, Any]:
 # enforcement on the Sika demo backend is never silently laissez-faire.
 _SIKA_TAI_DEFAULT: dict[str, Any] = {
     "tai": {
-        "policy_revision": "sika-tai-1-proof-10id",
+        "policy_revision": "sika-tai-1",
         "submission": {
             "creators": ["role:Owner", "role:Admin", "perm:creator"],
             "stages": [
@@ -89,31 +89,75 @@ _SIKA_TAI_DEFAULT: dict[str, Any] = {
                 }
             ],
         },
+        # Canonical Sika identity model (SIKA_TAI_AND_IDENTITY_CANON). Operator
+        # baseline is [] — Operators get EXPLICIT per-user grants only.
+        "role_permissions": {
+            "Owner": ["view_payment", "update_payment", "creator", "initiator",
+                       "reverser", "view_inbound", "accept_inbound"],
+            "Admin": ["view_payment", "creator", "initiator", "reverser", "view_inbound"],
+            "Operator": [],
+            "Support": [],
+        },
+        "user_permissions": {
+            "ojelade.folashade@ng.sika.com": {"permissions": [], "permission_exclusions": []},
+            "salami.adebayo@ng.sika.com": {"permissions": [], "permission_exclusions": []},
+            "bamkefaoluwa.ibukun@ng.sika.com": {"permissions": [], "permission_exclusions": []},
+            "agbede.oyindamola@ng.sika.com": {"permissions": ["creator"], "permission_exclusions": []},
+            "ibrahim.theresa@ng.sika.com": {"permissions": ["creator"], "permission_exclusions": []},
+            "ekechukwu.isdore@ng.sika.com": {"permissions": ["creator"], "permission_exclusions": []},
+            "adeyanju.adebola@ng.sika.com": {"permissions": ["update_payment", "view_payment"], "permission_exclusions": []},
+            "emiola.tunde@ng.sika.com": {"permissions": ["update_payment", "view_payment"], "permission_exclusions": []},
+            "aghomon.francisca@ng.sika.com": {"permissions": ["accept_inbound", "view_inbound"], "permission_exclusions": []},
+            "aroyewun.ibukun@ng.sika.com": {"permissions": ["view_inbound"], "permission_exclusions": []},
+        },
     }
 }
 
 
-def load_tai_config(app_state) -> "TR.TAIConfig":
-    """Resolve the active TAI config: live tenant config if it carries a 'tai'
-    block, else the bundled Sika default. Never raises — falls back to the
-    all-defaults resolver config on a parse error."""
-    raw: Any = None
+def _active_tai_raw(app_state) -> dict[str, Any]:
+    """The active ``tai`` dict: the live tenant config's tai block if present,
+    else the bundled Sika default. The canon NESTS role_permissions +
+    user_permissions inside the tai block (config.tenant_config.tai)."""
     cache = getattr(app_state, "config_cache", None)
     if cache is not None:
         try:
             raw = cache.raw
         except Exception:
             raw = None
-    if isinstance(raw, dict) and isinstance(raw.get("tai"), dict):
-        try:
-            return TR.parse_tai_config(raw)
-        except TR.TAIConfigError as exc:
-            logger.warning("tai_config parse failed; using bundled Sika default: %s", exc)
+        if isinstance(raw, dict) and isinstance(raw.get("tai"), dict):
+            return raw["tai"]
+    return _SIKA_TAI_DEFAULT["tai"]
+
+
+def load_tai_config(app_state) -> "TR.TAIConfig":
+    """Parse the active TAI config. The resolver reads ``role_permissions`` as a
+    SIBLING of ``tai``, but the canon nests it inside the tai block — so lift it.
+    Never raises — falls back to the all-defaults resolver config on parse error."""
+    tai_raw = _active_tai_raw(app_state)
+    payload = {"tai": tai_raw, "role_permissions": tai_raw.get("role_permissions")}
     try:
-        return TR.parse_tai_config(_SIKA_TAI_DEFAULT)
-    except TR.TAIConfigError as exc:  # pragma: no cover - bundled is valid
-        logger.error("bundled Sika TAI invalid: %s", exc)
+        return TR.parse_tai_config(payload)
+    except TR.TAIConfigError as exc:
+        logger.warning("tai_config parse failed; using all-defaults: %s", exc)
         return TR.default_tai_config()
+
+
+def user_perms_for(app_state, email: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Per-user TAI grants → (permissions, permission_exclusions) for ``email``.
+
+    The canon's Operator role baseline is [] — so a user's TAI authority
+    (creator / update_payment / accept_inbound / ...) comes from these EXPLICIT
+    per-user grants in ``tai.user_permissions``. Empty tuples when unknown."""
+    email_l = str(email or "").strip().lower()
+    if not email_l:
+        return (), ()
+    um = _active_tai_raw(app_state).get("user_permissions")
+    rec = um.get(email_l) if isinstance(um, dict) else None
+    if not isinstance(rec, dict):
+        return (), ()
+    perms = tuple(str(p) for p in (rec.get("permissions") or []) if str(p or "").strip())
+    excl = tuple(str(p) for p in (rec.get("permission_exclusions") or []) if str(p or "").strip())
+    return perms, excl
 
 
 async def resolve_actor(conn, request, body: dict[str, Any]) -> tuple[str, str, str]:
@@ -167,6 +211,8 @@ def check_can_approve(
     *,
     actor_email: str,
     actor_role: str,
+    extra_perms: tuple[str, ...] = (),
+    excluded_perms: tuple[str, ...] = (),
     surface: str = "submission",
     current_stage: int = 0,
     creator_email: str = "",
@@ -180,6 +226,8 @@ def check_can_approve(
         surface=surface,
         actor_email=actor_email,
         actor_role=actor_role,
+        actor_extra_permissions=extra_perms,
+        actor_excluded_permissions=excluded_perms,
         original_invoice_creator_email=creator_email,
         is_current_request_creator=is_creator,
         current_stage=current_stage or 0,
@@ -192,33 +240,49 @@ def check_can_approve(
     return current.eligible, current.reason
 
 
-def check_can_request(config, *, actor_email: str, actor_role: str) -> tuple[bool, str]:
+def check_can_request(
+    config, *, actor_email: str, actor_role: str,
+    extra_perms: tuple[str, ...] = (), excluded_perms: tuple[str, ...] = (),
+) -> tuple[bool, str]:
     """Can the actor initiate a submission-approval request (is a creator)?"""
     ok = TR.is_creator_of_surface(
         config=config, surface="submission",
         actor_email=actor_email, actor_role=actor_role,
+        actor_extra_permissions=extra_perms,
+        actor_excluded_permissions=excluded_perms,
     )
     return ok, ("submission_creator" if ok else "not_submission_creator")
 
 
 def check_can_reverse(
-    config, *, actor_email: str, actor_role: str, original_creator_email: str = ""
+    config, *, actor_email: str, actor_role: str,
+    extra_perms: tuple[str, ...] = (), excluded_perms: tuple[str, ...] = (),
+    original_creator_email: str = "",
 ) -> tuple[bool, str]:
     """Can the actor initiate a reversal (reversal-surface creator: the original
     invoice creator or a perm:reverser = Owner/Admin baseline)?"""
     ok = TR.is_creator_of_surface(
         config=config, surface="reversal",
         actor_email=actor_email, actor_role=actor_role,
+        actor_extra_permissions=extra_perms,
+        actor_excluded_permissions=excluded_perms,
         original_invoice_creator_email=original_creator_email,
     )
     return ok, ("reversal_creator" if ok else "not_reversal_creator")
 
 
-def check_has_permission(config, *, actor_role: str, perm: str) -> tuple[bool, str]:
-    """Does the actor's role baseline grant a TAI permission (accept_inbound /
-    update_payment / view_inbound / ...)?"""
+def check_has_permission(
+    config, *, actor_role: str, perm: str,
+    extra_perms: tuple[str, ...] = (), excluded_perms: tuple[str, ...] = (),
+) -> tuple[bool, str]:
+    """Does the actor's effective permission set (role baseline + per-user grants
+    − exclusions) include a TAI permission (accept_inbound / update_payment / ...)?
+    Operator role baseline is [] per canon, so per-user extras are essential."""
     perms = TR.effective_permissions(
-        role=actor_role, extra_permissions=(), role_permissions=config.role_permissions
+        role=actor_role,
+        extra_permissions=extra_perms,
+        excluded_permissions=excluded_perms,
+        role_permissions=config.role_permissions,
     )
     ok = perm in perms
     return ok, (f"has_{perm}" if ok else f"missing_{perm}")

@@ -56,6 +56,7 @@ from src.auth.tai_enforcement import (
     creator_email,
     load_tai_config,
     resolve_actor,
+    user_perms_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,9 +157,11 @@ async def _approval_gate(
                 {"error": f"invoice {invoice_id} not found"}, status_code=404
             )
         actor_uid, actor_email, actor_role = await resolve_actor(conn, request, body)
+        extra_perms, excluded_perms = user_perms_for(request.app.state, actor_email)
         if action == "request":
             allowed, reason = check_can_request(
-                tai_config, actor_email=actor_email, actor_role=actor_role
+                tai_config, actor_email=actor_email, actor_role=actor_role,
+                extra_perms=extra_perms, excluded_perms=excluded_perms,
             )
         else:
             c_email = await creator_email(conn, existing)
@@ -170,6 +173,8 @@ async def _approval_gate(
                 tai_config,
                 actor_email=actor_email,
                 actor_role=actor_role,
+                extra_perms=extra_perms,
+                excluded_perms=excluded_perms,
                 surface="submission",
                 current_stage=0,
                 creator_email=c_email,
